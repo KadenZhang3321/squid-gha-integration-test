@@ -10,8 +10,9 @@
 #   concurrency —— 同对象阶梯并发、异对象并发、混合工具并行
 #   parity      —— 透明重写同构校验（no-mirror-test tool-17 全量移植：13 规则
 #                  内容签名 + 负样本 + 回归守卫）
-#   upstream    —— 上游通道健康（META R17：Actions 构件通道单域集中失败判据、
-#                  gh-proxy 延迟预算、read_timeout 数据留档）
+#   upstream    —— 上游通道健康（META R17：gh-proxy 延迟预算（A/B 对照）、
+#                  read_timeout 数据留档；Actions 构件通道已入 NO_PROXY 直连，
+#                  不测不过 squid 的流量）
 #   miss-p95    —— SquidMissP95Slow 告警假慢复现（broker 长轮询 hold 顶爆
 #                  MISS p95 的口径缺陷，test-squid/repro-miss-p95.sh）
 #   tools       —— 真实工具链 e2e（no-mirror-test tool-* 移植：零镜像配置，
@@ -256,9 +257,9 @@ jobs:
           if-no-files-found: warn
 
   upstream:
-    name: 上游通道健康（R17：Actions 构件/gh-proxy）
-    # runner 层 only：Actions 构件通道与 gh-proxy 是 runner 环境关心的事，
-    # 与执行层（容器/CA）无关；判定采用单域集中失败 + 延迟预算（META R17）
+    name: 上游通道健康（R17：gh-proxy/read_timeout）
+    # runner 层 only：gh-proxy 是 runner 环境关心的事，与执行层（容器/CA）无关；
+    # Actions 构件通道两域已入 NO_PROXY 直连，不测不过 squid 的流量（META R17）
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     steps:
       - uses: actions/checkout@v7

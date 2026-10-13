@@ -974,6 +974,11 @@ tool-git() {
 #   判定原则（A/B 对照）：同通道走 squid 与直连各 5 次，squid 成功率 ≥ 直连
 #   且延迟不劣 → PASS；squid 比直连差 → FAIL（代理必须证明自己没让链路变差）。
 #   可达=2xx–4xx，5xx（squid 错误页）不算应答。
+#   范围收窄（2026-10-13）：Actions 构件通道两域（blob/results-receiver）已入
+#   NO_PROXY（PR 1926/1930）——生产流量直连不过 squid；A/B 的"squid 腿"靠 env
+#   代理，NO_PROXY 命中后同样是直连，相对判定退化为两条直连腿的抖动互搏
+#   （gy-001/gy-004 同 commit 一红一绿实证）。按"不测不过 squid 的流量"原则
+#   移出套件（actions-channels 已删），本组只测真走 squid 的通道。
 # =============================================================================
 
 # A/B 探测：同 URL 走 squid（默认 env）与直连（剥代理 env + --noproxy）各 N 次。
@@ -1027,18 +1032,6 @@ ab_verdict() {   # ab_verdict <host> <s_ok> <s_p50> <d_ok> <d_p50>
     return 0
 }
 
-# Actions 构件上传/下载通道：productionresultssa3(Azure blob) + results-receiver(GitHub)
-actions-channels() {
-    : > "$RESULTS_DIR/upstream-channels.log"
-    printf 'host\tpath\tcode\tseconds\tat\n' > "$RESULTS_DIR/upstream-probes.tsv"
-    local fail=0 h r
-    for h in productionresultssa3.blob.core.windows.net results-receiver.actions.githubusercontent.com; do
-        r=$(probe_ab "$h" "https://$h/" 5)
-        ab_verdict "$h" $r || fail=1
-    done
-    return $fail
-}
-
 # gh-proxy 健康度：A/B 对照（诊断实测 test 实例 p50 3.2s 已不健康；
 # 同时保留 5s 绝对预算——直连也慢说明是 host 本身的问题，不是 squid 的）
 GHPROXY_URL="${GHPROXY_URL:-https://gh-proxy.test.osinfra.cn}"
@@ -1046,6 +1039,9 @@ ghproxy-health() {
     # URL 形态对齐 CANN gitconfig insteadOf：<host>/https://github.com/...
     local url="$GHPROXY_URL/https://raw.githubusercontent.com/octocat/Hello-World/master/README"
     : > "$RESULTS_DIR/ghproxy.log"
+    # probe_ab / slow-upstream 的落盘文件（TSV 头在此初始化，调用方只追加）
+    : > "$RESULTS_DIR/upstream-channels.log"
+    printf 'host\tpath\tcode\tseconds\tat\n' > "$RESULTS_DIR/upstream-probes.tsv"
     local r fail=0
     r=$(probe_ab "gh-proxy" "$url" 5)
     # 内容抽查：squid 路最后一次拉取物必须非空
@@ -1110,10 +1106,10 @@ elif [ "$MODE" = "parity" ]; then
     run_timed meta-trace     "$LAYER" meta-trace
     run_timed rewrite-parity "$LAYER" rewrite-parity
 elif [ "$MODE" = "upstream" ]; then
-    # R17：上游通道健康（runner 层 only——Actions 构件通道/gh-proxy 是 runner 环境关心的事）
+    # R17：上游通道健康（runner 层 only——gh-proxy 是 runner 环境关心的事；
+    # Actions 构件通道已入 NO_PROXY 直连，不测不过 squid 的流量）
     run_timed env-snapshot      "$LAYER" env-snapshot
     run_timed meta-trace        "$LAYER" meta-trace
-    run_timed actions-channels  "$LAYER" actions-channels
     run_timed ghproxy-health    "$LAYER" ghproxy-health
     run_timed slow-upstream     "$LAYER" slow-upstream
 elif [ "$MODE" = "tools" ]; then

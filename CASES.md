@@ -201,14 +201,18 @@ GitHub Actions 构件通道（出口固有抖动，代理侧不可修）；gh-pr
 超时且实测 p50 3.2s（配置选择问题，可修）。本组把诊断判据固化为自动化测试——
 **单次失败仅记录，单域集中失败才 FAIL**（对齐告警降噪口径 `sum by (host) > 3`）。
 
+> 范围收窄（2026-10-13）：原 `actions-channels` 阶段（blob/results-receiver
+> 两域 A/B）已移除——两域入 NO_PROXY（PR 1926/1930）后生产流量直连不过
+> squid，A/B 的"squid 腿"靠 env 代理同样直连，相对判定退化为两条直连腿的
+> 抖动互搏（gy-001/gy-004 假红实证）。不测不过 squid 的流量。
+
 | 阶段 | 场景 | 判定 | 规则 |
 |---|---|---|---|
-| `actions-channels` | Actions 构件上传/下载通道 A/B 对照各 5 次：`productionresultssa3.blob.core.windows.net`（Azure blob 下载）、`results-receiver.actions.githubusercontent.com`（CreateArtifact 上传）；走 squid 与直连（剥代理 env）各 5 次 | 可达=2xx–4xx 应答（未认证 4xx 属预期；**5xx 不算**——经代理时 5xx 主要是 squid 错误页）。**squid 成功率 ≥ 直连 且 p50 ≤ 直连×1.5 → PASS；squid 比直连差 → FAIL**；直连全败=出口策略封锁，squid 是唯一通路（判 PASS 留档） | R17 A/B |
 | `ghproxy-health` | gh-proxy（`GHPROXY_URL`，默认 gh-proxy.test.osinfra.cn）真实拉取 octocat README，A/B 各 5 次（URL 形态对齐 CANN gitconfig insteadOf） | 同 A/B 判定 + **5s 绝对预算兜底**（A/B 相对判定可能双双都慢——同走坏 host，绝对线防漏）；内容抽查非空 | R17 A/B |
 | `slow-upstream` | 静默上游：本机 python 监听 accept 后不响应，`-x` 强制走 squid 测 read_timeout 实际形态 | 仅数据留档不判结论（CI 时限内无法观测 30min 超时；若 squid 短超时内回 504 说明 fail-fast 已生效） | R17 |
 
-runner 层 only 的原因：Actions 构件通道与 gh-proxy 是 runner 环境关心的事，
-与执行层（容器 CA/工具链）无关；且 results-receiver 上传域在容器层无语义。
+runner 层 only 的原因：gh-proxy 是 runner 环境关心的事，与执行层
+（容器 CA/工具链）无关。
 
 ## 结论口径
 

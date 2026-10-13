@@ -107,6 +107,12 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   **squid 成功率 ≥ 直连且延迟不劣（p50 ≤ 直连×1.5 噪声容差）→ PASS；
   squid 比直连差 → FAIL**——代理必须证明自己没让链路变差；直连全败
   （出口策略封锁）时 squid 是唯一通路，成功率判定自动满足。
+  **范围收窄**（2026-10-13，用户定标"不测不过 squid 的流量"）：Actions
+  构件通道两域（productionresultssa3 blob / results-receiver）入 NO_PROXY
+  （PR 1926/1930）后生产流量直连不过 squid——A/B 的"squid 腿"靠 env 代理，
+  NO_PROXY 命中后同样是直连，相对判定退化为两条直连腿的抖动互搏
+  （gy-001/gy-004 同 commit 一红一绿假红实证）。actions-channels 移出套件；
+  R17 判据保留于 gh-proxy 通道（不在 NO_PROXY，A/B 仍真实）+ read_timeout 留档。
 
 ## 六、与两份前作的关系
 

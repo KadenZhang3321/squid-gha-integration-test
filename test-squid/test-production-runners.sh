@@ -33,7 +33,7 @@ POLL_INTERVAL=30
 # ---------------------------------------------------------------------------
 RUNNERS=(
     "linux-amd64-cpu-2-gy001|gy-001|新增（2026-10-10 上产线）"
-    "linux-amd64-cpu-2-aiframe|aiframework|caNamespaces 已有"
+    "linux-aarch64-a3-2-aiframe|aiframework|caNamespaces 已有；aarch64（amd64 容量死锁，run 38370252096 实证换型）"
     "linux-amd64-cpu-2-gy003|gy-003|caNamespaces 已有，仅注入"
     "linux-amd64-cpu-2-hk001|hk-001|新增 postStart（原无 lifecycle）；CM 在 ascend-gha-runners-hk-001 ns"
     "linux-amd64-cpu-2-mind-third|mind-third-ci|caNamespaces + ascend-gha-runners"
