@@ -43,6 +43,14 @@ RESULTS_DIR="${RESULTS_DIR:-/tmp/test-squid-results}"
 LADDER="${LADDER:-1 4 8 16}"
 HEAVY="${HEAVY:-0}"
 
+# 宿主机架构：go/git-lfs/shfmt 的工具链 bootstrap 二进制按此选择
+# （a3 等 aarch64 runner 上下载 amd64 会 Exec format error，run 38359549887 实证）
+case "$(uname -m)" in
+    x86_64)        PKG_ARCH="amd64" ;;
+    aarch64|arm64) PKG_ARCH="arm64" ;;
+    *)             PKG_ARCH="amd64" ;;
+esac
+
 # 载荷 URL：真实路径 + 稳定对象（小 ~200KB / 中 ~1-2MB / 大 ~146MB）
 URL_SMALL="${URL_SMALL:-https://repo.huaweicloud.com/ubuntu-ports/dists/noble/Release}"
 URL_MED="${URL_MED:-https://repo.huaweicloud.com/ubuntu-ports/dists/noble/main/binary-arm64/Packages.gz}"
@@ -798,7 +806,7 @@ tool-goproxy() {
         echo "runner 无 go → 官方 tarball bootstrap（同时验证规则5 tarball 重写 + squid 大文件下载）"
         # squid 大文件冷下载实测 ~96KB/s（66.8MB 需 ~720s），600s 会超时（run 36571660908），
         # 放宽到 1200s；若 squid 已缓存则秒回
-        curl -sSL --max-time 1200 -o /tmp/go.tgz https://go.dev/dl/go1.26.1.linux-amd64.tar.gz \
+        curl -sSL --max-time 1200 -o /tmp/go.tgz "https://go.dev/dl/go1.26.1.linux-${PKG_ARCH}.tar.gz" \
             || { echo "❌ go tarball 下载失败（exit=$?，>20min 未完成）"; return 1; }
         mkdir -p "$RESULTS_DIR/goroot" && tar -C "$RESULTS_DIR/goroot" -xzf /tmp/go.tgz
         export PATH="$RESULTS_DIR/goroot/go/bin:$PATH"
@@ -816,7 +824,7 @@ tool-goproxy() {
 tool-wget() {
     need wget || return 2
     wget -q --timeout=90 -O "$RESULTS_DIR/shfmt" \
-        https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64 \
+        https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_${PKG_ARCH} \
         || { echo "❌ wget release 失败"; return 1; }
     [ "$(od -An -tx1 -N4 "$RESULTS_DIR/shfmt" | tr -d ' \n')" = "7f454c46" ] \
         || { echo "❌ 下载内容非 ELF（重写路径不同构?）"; return 1; }
@@ -831,7 +839,7 @@ tool-gitlfs() {
     echo "runner 无 git-lfs → 官方 release bootstrap（验证规则3 工具链自举；极简镜像无 wget 用 curl）"
     local d="$RESULTS_DIR/gitlfs"; rm -rf "$d"; mkdir -p "$d"
     curl -sSL --max-time 300 -o "$d/lfs.tar.gz" \
-        https://github.com/git-lfs/git-lfs/releases/download/v3.7.0/git-lfs-linux-amd64-v3.7.0.tar.gz \
+        https://github.com/git-lfs/git-lfs/releases/download/v3.7.0/git-lfs-linux-${PKG_ARCH}-v3.7.0.tar.gz \
         || { echo "❌ git-lfs release 下载失败"; return 1; }
     tar -C "$d" -xzf "$d/lfs.tar.gz"
     "$d"/git-lfs-3.7.0/git-lfs version || { echo "❌ git-lfs 二进制不可用"; return 1; }
