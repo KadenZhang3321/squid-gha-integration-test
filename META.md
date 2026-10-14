@@ -113,6 +113,18 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   NO_PROXY 命中后同样是直连，相对判定退化为两条直连腿的抖动互搏
   （gy-001/gy-004 同 commit 一红一绿假红实证）。actions-channels 移出套件；
   R17 判据保留于 gh-proxy 通道（不在 NO_PROXY，A/B 仍真实）+ read_timeout 留档。
+- **R18 镜像构建外网面复刻**（2026-10-14，源自 vllm-ascend Image Build and Push
+  流量归因）：真实镜像构建（Dockerfile.310p）的出网面里，过 squid 的只有三类
+  外网流量——① checkout@v7 submodules:recursive 按 .gitmodules 拉
+  gitcode.com/cann/catlass（pinned commit）；② COMPILE_CUSTOM_KERNELS=1 时
+  csrc cmake 拉 gitcode.com/cann-src-third-party 5 个 release 压缩包（REQ_URL，
+  protobuf 两个 cmake 重复出现算一个）；③ Dockerfile L92 经 GIT_PROXY
+  insteadOf clone github.com/vllm-project/vllm。mock 复刻这三路真实 URL/commit/
+  tag（外网面全量口径）；集群内 cache-service（pypi/yum/rustup/crates）已入
+  NO_PROXY 直连，不测不过 squid 的流量（与 R17 收窄同口径）。
+  判定：fetch/下载/clone 成功且内容落盘 + tarball 两遍 sha256 一致（缓存内容
+  完整性）；Cache-Status 只留档不判结论（静态 release 资产可缓存性取决于
+  squid refresh_pattern，是数据点不是断言）。
 
 ## 六、与两份前作的关系
 

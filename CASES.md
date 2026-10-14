@@ -214,6 +214,26 @@ GitHub Actions 构件通道（出口固有抖动，代理侧不可修）；gh-pr
 runner 层 only 的原因：gh-proxy 是 runner 环境关心的事，与执行层
 （容器 CA/工具链）无关。
 
+### imagebuild 组（镜像构建网络模拟，R18，runner 层 only）
+
+背景（2026-10-14）：vllm-ascend 的 Image Build and Push（_schedule_image_build.yaml
++ Dockerfile.310p）是 runner 集群上最重的真实外网负载之一，出网面里过 squid 的
+有三路——catlass 子模块（gitcode.com）、cmake 第三方压缩包
+（gitcode.com/cann-src-third-party，`COMPILE_CUSTOM_KERNELS=1` 即 csrc 缓存
+miss 时触发）、GIT_PROXY 形态 clone vllm（github.com 经 gh-proxy insteadOf
+重写）。本组用真实 commit/tag/REQ_URL 复刻这三路（外网面全量口径）；集群内
+cache-service（pypi/yum/rustup/crates）已入 NO_PROXY 直连，不测不过 squid 的流量。
+
+| 阶段 | 场景 | 判定 | 规则 |
+|---|---|---|---|
+| `ib-catlass` | `git fetch --depth 1` 固定 commit（`CATLASS_COMMIT`，.gitmodules pinned）拉 gitcode.com/cann/catlass（checkout submodules:recursive 形态） | fetch 成功 + 工作区内容落盘（>10 文件）；pinned commit 被托管端拒绝时回退默认分支 depth1（⚠️ 降级数据点，不判失败） | R18 |
+| `ib-tarballs` | cmake REQ_URL 5 个 release 压缩包（abseil-cpp/protobuf/googletest/json/makeself）两遍拉取；明细落 probes.tsv + imagebuild-cache.tsv | 两遍均 2xx + sha256 一致（缓存内容完整性）；Cache-Status 仅留档不判结论（可缓存性取决于 refresh_pattern） | R18 |
+| `ib-vllm-gitproxy` | gitconfig `url.<GIT_PROXY>https://github.com/.insteadOf` + `clone --depth 1 -b <tag>`（Dockerfile L86/L92 形态，大 pack 吞吐）；tag 预检不存在自动取最新 tag | clone 成功 + 工作区 >100 文件 | R18 |
+
+runner 层 only：镜像构建的 checkout/cmake 流量发生在 runner workspace（docker
+build 之前），与执行层（容器 CA）无关。参数可覆盖：`CATLASS_COMMIT` /
+`IB_GIT_PROXY` / `IB_VLLM_REF`（`IB_GIT_PROXY` 置空 = 直连，本地冒烟逃生门）。
+
 ## 结论口径
 
 - **PASS**：判定项全部达标（缓存 MISS→HIT 无缓存头等"数据记录"场景不阻断结论，但计入数据）。

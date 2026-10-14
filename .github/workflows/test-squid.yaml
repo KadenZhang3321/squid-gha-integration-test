@@ -13,6 +13,8 @@
 #   upstream    —— 上游通道健康（META R17：gh-proxy 延迟预算（A/B 对照）、
 #                  read_timeout 数据留档；Actions 构件通道已入 NO_PROXY 直连，
 #                  不测不过 squid 的流量）
+#   imagebuild  —— 镜像构建网络模拟（vllm-ascend Dockerfile.310p 外网面：
+#                  catlass 子模块 + cmake 第三方压缩包 + GIT_PROXY clone vllm）
 #   miss-p95    —— SquidMissP95Slow 告警假慢复现（broker 长轮询 hold 顶爆
 #                  MISS p95 的口径缺陷，test-squid/repro-miss-p95.sh）
 #   tools       —— 真实工具链 e2e（no-mirror-test tool-* 移植：零镜像配置，
@@ -275,6 +277,27 @@ jobs:
           path: /tmp/test-squid-results/
           if-no-files-found: warn
 
+  imagebuild:
+    name: 镜像构建网络模拟（vllm-ascend 外网面）
+    # runner 层 only：复刻 Dockerfile.310p 构建的出网面——catlass 子模块
+    # （gitcode.com）、cmake 第三方压缩包（gitcode.com/cann-src-third-party）、
+    # GIT_PROXY insteadOf clone vllm（github.com 大 pack）；集群内 cache-service
+    # 已入 NO_PROXY 直连，不测不过 squid 的流量
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 运行镜像构建网络模拟
+        run: bash test-squid/run-suite.sh --mode imagebuild
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-squid-imagebuild
+          path: /tmp/test-squid-results/
+          if-no-files-found: warn
+
   miss-p95:
     name: MISS p95 假慢复现（broker 长轮询诊断）
     # 2026-10-09 SquidMissP95Slow 告警诊断的复现场景：GHA runner 保活长轮询
@@ -329,7 +352,7 @@ jobs:
 
   summary:
     name: 汇总
-    needs: [function, concurrency, vllm, parity, tools, upstream, miss-p95, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95]
+    needs: [function, concurrency, vllm, parity, tools, upstream, imagebuild, miss-p95, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -343,7 +366,7 @@ jobs:
         if: always()
         run: |
           echo "## test-squid 汇总" >> "$GITHUB_STEP_SUMMARY"
-          for d in test-squid-function test-squid-concurrency test-squid-vllm test-squid-parity test-squid-upstream test-squid-tools test-squid-miss-p95 \
+          for d in test-squid-function test-squid-concurrency test-squid-vllm test-squid-parity test-squid-upstream test-squid-imagebuild test-squid-tools test-squid-miss-p95 \
                    test-squid-container-function test-squid-container-concurrency test-squid-container-vllm test-squid-container-tools test-squid-container-miss-p95; do
             if [ -f "$d/timings.tsv" ] || [ -f "$d/probes.tsv" ]; then
               echo "### $d" >> "$GITHUB_STEP_SUMMARY"

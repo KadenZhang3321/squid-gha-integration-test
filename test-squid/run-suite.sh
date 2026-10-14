@@ -6,7 +6,7 @@
 #   - Squid 代理已由 runner / 工作负载 pod 注入（HTTP(S)_PROXY + MITM CA），
 #     本脚本【不配置任何代理】，只复用 pod 注入的环境。
 #   - 场景阶段化：每个阶段独立计时、失败不影响其它阶段（run_timed 全量记录）。
-#   - 通过 --mode 选择阶段组，与 .github/workflows/test-squid.yaml 的两个 job 对应：
+#   - 通过 --mode 选择阶段组，与 .github/workflows/test-squid.yaml 的各 job 对应：
 #       function    —— squid 功能：代理/隧道/MITM、缓存 MISS→HIT、完整性、失败面
 #       concurrency —— 并发：同对象阶梯、异对象阶梯、混合工具并行
 #
@@ -19,6 +19,7 @@
 #   LADDER        并发度阶梯，默认 "1 4 8 16"
 #   HEAVY         1=启用大载荷（~146MB torch wheel，默认 0）
 #   URL_SMALL/URL_MED/URL_HEAVY   三档载荷 URL（真实 URL、mock 大小）
+#   CATLASS_COMMIT/IB_GIT_PROXY/IB_VLLM_REF   imagebuild 组参数（见下文定义处）
 #
 # 输出（RESULTS_DIR 下）：
 #   timings.tsv   阶段<TAB>秒<TAB>状态(0/1/SKIP)<TAB>组
@@ -55,6 +56,14 @@ esac
 URL_SMALL="${URL_SMALL:-https://repo.huaweicloud.com/ubuntu-ports/dists/noble/Release}"
 URL_MED="${URL_MED:-https://repo.huaweicloud.com/ubuntu-ports/dists/noble/main/binary-arm64/Packages.gz}"
 URL_HEAVY="${URL_HEAVY:-https://files.pythonhosted.org/packages/78/89/f5554b13ebd71e05c0b002f95148033e730d3f7067f67423026cc9c69410/torch-2.10.0-cp311-cp311-manylinux_2_28_aarch64.whl}"
+
+# imagebuild 组：vllm-ascend Dockerfile.310p 外网流量面复刻参数
+#   CATLASS_COMMIT  catlass 子模块 .gitmodules 固定 commit（checkout submodules:recursive 形态）
+#   IB_GIT_PROXY    镜像内 gitconfig insteadOf 前缀（GIT_PROXY build-arg）；置空 = 直连（本地冒烟）
+#   IB_VLLM_REF     vllm tag（Dockerfile VLLM_TAG）；不存在时自动改用最新 tag，避免上游发版打失效 mock
+CATLASS_COMMIT="${CATLASS_COMMIT:-41bf90da655bba3c66d0acd7e00abe33960ecfd6}"
+IB_GIT_PROXY="${IB_GIT_PROXY:-https://gh-proxy.test.osinfra.cn/}"
+IB_VLLM_REF="${IB_VLLM_REF:-v0.11.0}"
 
 mkdir -p "$RESULTS_DIR"
 TSV="$RESULTS_DIR/timings.tsv"
@@ -1079,6 +1088,113 @@ c,_=s.accept(); time.sleep(90)
 }
 
 # =============================================================================
+# imagebuild 组 —— 镜像构建外网流量面复刻（vllm-ascend Image Build and Push）
+#   背景：Dockerfile.310p 构建的出网面 = ① checkout@v7 submodules:recursive 按
+#   .gitmodules 拉 gitcode.com/cann/catlass；② COMPILE_CUSTOM_KERNELS=1 时
+#   csrc cmake 拉 gitcode.com/cann-src-third-party 5 个 release 压缩包（REQ_URL，
+#   protobuf 在 protobuf.cmake / ascend_protobuf.cmake 重复出现已去重）；
+#   ③ Dockerfile L92 经 GIT_PROXY insteadOf clone github.com/vllm-project/vllm。
+#   集群内 cache-service（pypi/yum/rustup/crates）已入 NO_PROXY 直连不过 squid，
+#   按"不测不过 squid 的流量"原则不在本组（与 upstream 组同口径）。
+# =============================================================================
+
+IB_TARBALLS=(
+    "abseil-cpp|https://gitcode.com/cann-src-third-party/abseil-cpp/releases/download/20230802.1/abseil-cpp-20230802.1.tar.gz"
+    "protobuf|https://gitcode.com/cann-src-third-party/protobuf/releases/download/v25.1/protobuf-25.1.tar.gz"
+    "googletest|https://gitcode.com/cann-src-third-party/googletest/releases/download/v1.14.0/googletest-1.14.0.tar.gz"
+    "json|https://gitcode.com/cann-src-third-party/json/releases/download/v3.11.3/include.zip"
+    "makeself|https://gitcode.com/cann-src-third-party/makeself/releases/download/release-2.5.0-patch1.0/makeself-release-2.5.0-patch1.tar.gz"
+)
+
+# ① catlass 子模块：actions/checkout@v7 submodules:recursive 形态 = git fetch
+#    固定 commit → 内容落盘（对应构建机 COPY 进镜像的动作）
+ib-catlass() {
+    local dir="$RESULTS_DIR/catlass" mode="pinned"
+    rm -rf "$dir"; mkdir -p "$dir"
+    echo "--- gitcode.com/cann/catlass @ $CATLASS_COMMIT（checkout submodules:recursive 形态）---"
+    (
+        cd "$dir" && git init -q . && git remote add origin https://gitcode.com/cann/catlass.git &&
+        git fetch -q --depth 1 origin "$CATLASS_COMMIT" && git checkout -q FETCH_HEAD
+    ) 2>"$RESULTS_DIR/catlass.err" || mode="default"
+    if [ "$mode" = "default" ]; then
+        # 部分托管端不放开任意 commit fetch（allowAnySHA1InWant）→ 回退默认分支
+        # depth1：仅数据点（mock 形态降级），不判失败——代理链路是否通由内容落盘判
+        echo "⚠️ pinned commit fetch 被拒（$(head -c 160 "$RESULTS_DIR/catlass.err" | tr '\n' ' ')），回退默认分支 depth1"
+        (
+            cd "$dir" && git fetch -q --depth 1 origin && git checkout -q FETCH_HEAD
+        ) 2>>"$RESULTS_DIR/catlass.err" || { echo "❌ catlass fetch 失败（含默认分支回退）"; return 1; }
+    fi
+    local n
+    n=$(find "$dir" -type f -not -path '*/.git/*' | wc -l)
+    [ "$n" -gt 10 ] || { echo "❌ catlass 工作区仅 $n 个文件，子模块内容未落盘"; return 1; }
+    echo "✅ catlass 内容落盘（$mode）：$n 个文件，HEAD $(git -C "$dir" rev-parse --short HEAD)"
+}
+
+# ② cmake 第三方压缩包：csrc/cmake/third_party 各 .cmake 的 REQ_URL。
+#    两遍拉取（同对象复拉）：sha256 一致性判缓存内容完整性；Cache-Status 留档
+#    （静态 release 资产可缓存性取决于 squid refresh_pattern，HIT/MISS 不判结论）
+ib-tarballs() {
+    local item name url f1 f2 h1 h2 out c1 c2 t1 t2 xc bad=0
+    echo "--- gitcode.com/cann-src-third-party release 压缩包（cmake REQ_URL 两遍拉取）---"
+    for item in "${IB_TARBALLS[@]}"; do
+        name="${item%%|*}"; url="${item#*|}"
+        f1="$RESULTS_DIR/tb-$name.r1"; f2="$RESULTS_DIR/tb-$name.r2"
+        rm -f "$f1" "$f2" "$RESULTS_DIR/tb-$name.hdr"
+        # 第一遍：冷拉（cmake 首次构建形态），-D 收响应头看 Cache-Status
+        out=$(px_curl -D "$RESULTS_DIR/tb-$name.hdr" -L -o "$f1" -w '%{http_code} %{time_total}' "$url")
+        c1=${out%% *}; t1=${out##* }
+        printf '%s\t%s\t%s\n' "$url" "$c1" "$t1" >> "$PROBES"
+        # 第二遍：同对象复拉（缓存命中形态 + 完整性比对）
+        out=$(px_curl -L -o "$f2" -w '%{http_code} %{time_total}' "$url")
+        c2=${out%% *}; t2=${out##* }
+        printf '%s\t%s\t%s\n' "$url" "$c2" "$t2" >> "$PROBES"
+        h1=$(sha256_of "$f1"); h2=$(sha256_of "$f2")
+        xc=$(grep -ai '^x-cache:' "$RESULTS_DIR/tb-$name.hdr" 2>/dev/null | head -1 | tr -d '\r' | cut -d' ' -f2-)
+        if [[ "$c1" != 2* || "$c2" != 2* ]]; then
+            echo "❌ $name：拉取失败（r1=$c1 r2=$c2）$url"; bad=$((bad+1)); continue
+        fi
+        if [ -s "$f1" ] && [ "$h1" = "$h2" ]; then
+            printf 'tb-tarball\t%s\t%s\tr1=%ss r2=%ss\n' "$name" "${xc:-N/A}" "$t1" "$t2" >> "$RESULTS_DIR/imagebuild-cache.tsv"
+            echo "✅ $name：${t1}s/${t2}s，sha256 两遍一致，X-Cache: ${xc:-N/A}"
+        else
+            echo "❌ $name：两遍 sha256 不一致或内容为空（r1=$h1 r2=$h2）——缓存内容完整性存疑"
+            bad=$((bad+1))
+        fi
+    done
+    [ "$bad" -eq 0 ] || return 1
+    echo "⚠️ Cache-Status 仅留档（imagebuild-cache.tsv / probes.tsv），HIT/MISS 不判结论"
+    return 0
+}
+
+# ③ vllm clone：Dockerfile.310p L92 形态 = gitconfig url.insteadOf 把 github.com
+#    重写到 GIT_PROXY 后 clone --depth 1 -b <VLLM_TAG>（大 pack 吞吐通道）
+ib-vllm-gitproxy() {
+    local dir="$RESULTS_DIR/vllm-clone" ref="$IB_VLLM_REF"
+    rm -rf "$dir"
+    # insteadOf 形态与 Dockerfile L86 一致；IB_GIT_PROXY 为空 → 不加配置（直连，本地冒烟逃生门）
+    local g=()
+    [ -n "$IB_GIT_PROXY" ] && g=(-c "url.${IB_GIT_PROXY}https://github.com/.insteadOf=https://github.com/")
+    echo "--- github.com/vllm-project/vllm --depth 1 -b $ref（insteadOf → ${IB_GIT_PROXY:-直连}）---"
+    # tag 预检：Dockerfile 用固定 VLLM_TAG；上游发版后旧 tag 不存在则改用最新 tag
+    if ! git "${g[@]}" ls-remote --exit-code --tags https://github.com/vllm-project/vllm "refs/tags/$ref" >/dev/null 2>&1; then
+        ref=$(git "${g[@]}" ls-remote --tags https://github.com/vllm-project/vllm \
+              | awk -F'/' '{print $NF}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+        [ -n "$ref" ] || { echo "❌ vllm tag 预检失败（$IB_VLLM_REF 不存在且取不到最新 tag）"; return 1; }
+        echo "⚠️ 指定 tag $IB_VLLM_REF 不存在，改用最新 tag $ref"
+    fi
+    if timeout 600 git "${g[@]}" clone -q --depth 1 -b "$ref" \
+        https://github.com/vllm-project/vllm "$dir" 2>"$RESULTS_DIR/vllm-clone.err"; then
+        local n
+        n=$(find "$dir" -type f -not -path '*/.git/*' | wc -l)
+        [ "$n" -gt 100 ] || { echo "❌ vllm 工作区仅 $n 个文件，clone 不完整"; return 1; }
+        echo "✅ vllm@$ref clone 完成：$n 个文件（大 pack 吞吐经 ${IB_GIT_PROXY:-直连}）"
+    else
+        echo "❌ vllm clone 失败：$(head -c 200 "$RESULTS_DIR/vllm-clone.err" | tr '\n' ' ')"
+        return 1
+    fi
+}
+
+# =============================================================================
 # 主流程
 # =============================================================================
 log "== test-squid run-suite mode=$MODE =="
@@ -1112,6 +1228,14 @@ elif [ "$MODE" = "upstream" ]; then
     run_timed meta-trace        "$LAYER" meta-trace
     run_timed ghproxy-health    "$LAYER" ghproxy-health
     run_timed slow-upstream     "$LAYER" slow-upstream
+elif [ "$MODE" = "imagebuild" ]; then
+    # 镜像构建外网流量面复刻（runner 层 only；vllm-ascend Image Build and Push 的
+    # gitcode.com + GIT_PROXY github 通道——cache-service 集群内直连不测）
+    run_timed env-snapshot      "$LAYER" env-snapshot
+    run_timed meta-trace        "$LAYER" meta-trace
+    run_timed ib-catlass        "$LAYER" ib-catlass
+    run_timed ib-tarballs       "$LAYER" ib-tarballs
+    run_timed ib-vllm-gitproxy  "$LAYER" ib-vllm-gitproxy
 elif [ "$MODE" = "tools" ]; then
     # pip --user 装的 CLI（uv/modelscope 等）落 ~/.local/bin，极简镜像 PATH 默认不含
     export PATH="$HOME/.local/bin:$PATH"
@@ -1135,7 +1259,7 @@ elif [ "$MODE" = "tools" ]; then
         run_timed tool-precommit "$LAYER" tool-precommit
     fi
 else
-    echo "未知 mode: $MODE（可选 function | concurrency | vllm | parity | upstream | tools）" >&2
+    echo "未知 mode: $MODE（可选 function | concurrency | vllm | parity | upstream | imagebuild | tools）" >&2
     exit 2
 fi
 
