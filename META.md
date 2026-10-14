@@ -125,6 +125,9 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   判定：fetch/下载/clone 成功且内容落盘 + tarball 两遍 sha256 一致（缓存内容
   完整性）；Cache-Status 只留档不判结论（静态 release 资产可缓存性取决于
   squid refresh_pattern，是数据点不是断言）。
+  两层口径（2026-10-14 增补）：真实构建里 catlass checkout 在 runner workspace
+  （build 之前）、cmake 拉包与 vllm clone 在 build 容器内——runner 层验链路，
+  容器层验镜像内 gitconfig insteadOf（环境正道）+ CA 信任路径下三路全通。
 
 ## 六、与两份前作的关系
 

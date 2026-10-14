@@ -1229,7 +1229,7 @@ elif [ "$MODE" = "upstream" ]; then
     run_timed ghproxy-health    "$LAYER" ghproxy-health
     run_timed slow-upstream     "$LAYER" slow-upstream
 elif [ "$MODE" = "imagebuild" ]; then
-    # 镜像构建外网流量面复刻（runner 层 only；vllm-ascend Image Build and Push 的
+    # 镜像构建外网流量面复刻（runner/容器两层；vllm-ascend Image Build and Push 的
     # gitcode.com + GIT_PROXY github 通道——cache-service 集群内直连不测）
     run_timed env-snapshot      "$LAYER" env-snapshot
     run_timed meta-trace        "$LAYER" meta-trace

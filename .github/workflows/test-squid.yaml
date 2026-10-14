@@ -350,9 +350,32 @@ jobs:
           path: /tmp/repro-miss-p95/
           if-no-files-found: warn
 
+  container-imagebuild:
+    name: 容器层·镜像构建网络模拟（CANN 镜像）
+    needs: [imagebuild, container-miss-p95]
+    # 容器层复刻更贴近真实构建执行环境：cmake REQ_URL 拉包与 Dockerfile L92 的
+    # vllm clone 本就发生在 build 容器内；镜像自带 gitconfig insteadOf（环境正道）
+    # 与脚本 -c 同值叠加，验证镜像内 gitconfig 形态下三路外网流量全通 + CA 信任路径
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 运行镜像构建网络模拟（容器层）
+        run: bash test-squid/run-suite.sh --mode imagebuild --container
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-squid-container-imagebuild
+          path: /tmp/test-squid-results/
+          if-no-files-found: warn
+
   summary:
     name: 汇总
-    needs: [function, concurrency, vllm, parity, tools, upstream, imagebuild, miss-p95, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95]
+    needs: [function, concurrency, vllm, parity, tools, upstream, imagebuild, miss-p95, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95, container-imagebuild]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -367,7 +390,7 @@ jobs:
         run: |
           echo "## test-squid 汇总" >> "$GITHUB_STEP_SUMMARY"
           for d in test-squid-function test-squid-concurrency test-squid-vllm test-squid-parity test-squid-upstream test-squid-imagebuild test-squid-tools test-squid-miss-p95 \
-                   test-squid-container-function test-squid-container-concurrency test-squid-container-vllm test-squid-container-tools test-squid-container-miss-p95; do
+                   test-squid-container-function test-squid-container-concurrency test-squid-container-vllm test-squid-container-tools test-squid-container-miss-p95 test-squid-container-imagebuild; do
             if [ -f "$d/timings.tsv" ] || [ -f "$d/probes.tsv" ]; then
               echo "### $d" >> "$GITHUB_STEP_SUMMARY"
               echo '```' >> "$GITHUB_STEP_SUMMARY"
