@@ -40,6 +40,10 @@ on:
         description: '1=启用大载荷（~146MB wheel）'
         required: false
         default: '0'
+      bundle_fix:
+        description: '1=cabundle 矩阵把 CA 变量重指向系统 bundle（验证根修形态，postStart 预演）'
+        required: false
+        default: '0'
   pull_request:
     paths:
       - 'test-squid/**'
@@ -313,6 +317,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: 运行 no_proxy × CA 矩阵
+        env:
+          BUNDLE_FIX: ${{ github.event_name == 'pull_request' && '0' || inputs.bundle_fix }}
         run: bash test-squid/run-suite.sh --mode cabundle
 
       - name: 上传结果
@@ -410,6 +416,8 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: 运行 no_proxy × CA 矩阵（容器层）
+        env:
+          BUNDLE_FIX: ${{ github.event_name == 'pull_request' && '0' || inputs.bundle_fix }}
         run: bash test-squid/run-suite.sh --mode cabundle --container
 
       - name: 上传结果

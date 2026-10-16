@@ -78,6 +78,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 1.5 BUNDLE_FIX 实验（BUNDLE_FIX=1 启用）：不等平台侧改 Secret，就地验证
+#     "CA 变量指向含 squid CA 的系统 bundle"的修复可行性——即 postStart
+#     临时修复形态。判定系统 bundle 是否已含 squid CA（SHA256 指纹比对）：
+#     已含 → 全部 CA 变量直接重指向系统 bundle（零合成）；
+#     不含 → 拼接兜底（squid CA + 系统 bundle → composite 文件再指向）。
+#     注意：不是 ln——symlink 无法合并两个文件的内容，必须拼接。
+# ---------------------------------------------------------------------------
+if [ "${BUNDLE_FIX:-0}" = "1" ]; then
+    SYS_BUNDLE=""
+    for c in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+        [ -r "$c" ] && SYS_BUNDLE="$c" && break
+    done
+    if [ -n "$SYS_BUNDLE" ]; then
+        match=$(python3 - "$CA" "$SYS_BUNDLE" <<'PYEOF' 2>/dev/null
+import sys, hashlib
+def certs(path):
+    pems, cur = [], None
+    for line in open(path, encoding='utf-8', errors='replace'):
+        if 'BEGIN CERTIFICATE' in line:
+            cur = []
+        elif 'END CERTIFICATE' in line and cur is not None:
+            pems.append(''.join(cur)); cur = None
+        elif cur is not None:
+            cur.append(line.strip())
+    return {hashlib.sha256(p.encode()).hexdigest() for p in pems}
+squid = certs(sys.argv[1])
+bundle = certs(sys.argv[2])
+print('MATCH' if squid and squid <= bundle else 'MISS')
+PYEOF
+)
+        if [ "$match" = "MATCH" ]; then
+            log "### BUNDLE_FIX: 系统 bundle（$SYS_BUNDLE）已含 squid CA → 6 个 CA 变量直接重指向它（零合成）"
+            CA="$SYS_BUNDLE"
+        else
+            COMPOSITE="$RESULTS_DIR/composite-ca-bundle.pem"
+            cat "$CA" "$SYS_BUNDLE" > "$COMPOSITE"
+            n_comp=$(grep -c 'BEGIN CERTIFICATE' "$COMPOSITE" 2>/dev/null); n_comp=${n_comp:-0}
+            log "### BUNDLE_FIX: 系统 bundle 不含 squid CA → 拼接合成（squid CA($n_certs) + $SYS_BUNDLE → $COMPOSITE，$n_comp 张）"
+            CA="$COMPOSITE"
+        fi
+        n_ca=$(grep -c 'BEGIN CERTIFICATE' "$CA" 2>/dev/null); n_ca=${n_ca:-0}
+        log "### BUNDLE_FIX: 最终 CA = $CA（$n_ca 张）→ 直连/MITM 双兼容预期 ✅"
+    else
+        log "### BUNDLE_FIX: 未找到系统 CA bundle（试过 ca-certificates.crt/ca-bundle.crt/cert.pem），跳过合成"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 2. 环境模拟：幂等 export 平台注入的全套变量（pod 已注入时无副作用）
 #    本地冒烟时即"手动 set env"的等价物
 # ---------------------------------------------------------------------------
