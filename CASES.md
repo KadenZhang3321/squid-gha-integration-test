@@ -237,6 +237,21 @@ cmake 拉包与 vllm clone 发生在 build 容器内——runner 层验链路，
 `CATLASS_COMMIT` / `IB_GIT_PROXY` / `IB_VLLM_REF`（`IB_GIT_PROXY` 置空 =
 直连，本地冒烟逃生门）。
 
+### cabundle 组（no_proxy × CA 注入矩阵，R19，runner + 容器两层）
+
+背景（2026-10-16）：runner pod env 同时注入 no_proxy（构件通道/broker 域名
+直连）与 6 个 CA 变量（全指向 /etc/squid-ca/squid-ca.pem）。两类注入各自
+正确、组合却可能断裂：排他 CAfile 语义的工具（curl/git/requests/pip）在
+直连腿只信 squid-ca.pem 一个文件——它必须同时含 squid CA（MITM 腿）与
+公共根（直连腿），即 bundle 形态。
+
+| 阶段 | 场景 | 判定 | 规则 |
+|---|---|---|---|
+| `cabundle-matrix` | 独立脚本 `no-proxy-ca-test.sh`：① CA 文件数证书张数（1 张=纯 squid CA / ≥2 张=bundle）；② no_proxy 生效性（api.github.com 出网无 CONNECT 行）；③ 直连腿（curl/s_client/requests/node，公共 CA 证书）+ 经 squid 腿（curl/git/requests/pip，MITM 重签） | 任一 TLS-FAIL → FAIL（直连红=排他变量挤掉公共根，squid-ca.pem 需换 bundle；代理红=MITM 信任断裂）；OTHER-ERR（网络/协议层）与 SKIP（工具缺失，如镜像无 node）记录不判红 | R19 |
+
+本地冒烟：`CA=/etc/ssl/certs/ca-certificates.crt bash test-squid/no-proxy-ca-test.sh`
+（本机无 squid-ca.pem，用系统 bundle 验脚本逻辑；无代理 env 时 proxy 腿 SKIP）。
+
 ## 结论口径
 
 - **PASS**：判定项全部达标（缓存 MISS→HIT 无缓存头等"数据记录"场景不阻断结论，但计入数据）。

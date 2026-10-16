@@ -128,6 +128,23 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   两层口径（2026-10-14 增补）：真实构建里 catlass checkout 在 runner workspace
   （build 之前）、cmake 拉包与 vllm clone 在 build 容器内——runner 层验链路，
   容器层验镜像内 gitconfig insteadOf（环境正道）+ CA 信任路径下三路全通。
+- **R19 no_proxy 直连 × CA 注入形态自洽**（2026-10-16，源自平台 CA 注入变量组
+  排查）：平台向 pod 注入 6 个 CA 变量（全指向 /etc/squid-ca/squid-ca.pem），
+  按工具实现分三类语义——排他 CAfile（CURL_CA_BUNDLE / REQUESTS_CA_BUNDLE /
+  GIT_SSL_CAINFO / PIP_CERT，信任集=仅该文件）、库级 default-paths
+  （SSL_CERT_FILE，file∪dir 联合、默认 CA 目录仍兜底）、追加
+  （NODE_EXTRA_CA_CERTS，不替换内置 Mozilla 根）。风险：no_proxy 命中 →
+  流量直连 → 对端是公共 CA 证书，排他变量若指向纯 squid CA（不含公共根）
+  则直连 TLS 断裂（curl error 60/77、requests SSLError）——squid 无恙，
+  是注入形态问题。唯一自洽形态：squid-ca.pem 为 bundle（squid CA + 公共根
+  拼接）。测试三件事：① CA 文件形态取证（数证书张数）；② no_proxy 生效性
+  （api.github.com 绕开 squid，无 CONNECT 行）；③ 工具×路径矩阵——直连腿
+  （公共证书：curl/s_client/requests/node）+ 经 squid 腿（MITM 重签：
+  curl/git/requests/pip）。判定：任一 TLS-FAIL 即红（直连红=公共根被挤出；
+  代理红=MITM 信任断裂）；OTHER-ERR/SKIP 记录不判红。
+  2026-10-16 本机语义实证：curl 8.22 对 SSL_CERT_FILE 走排他加载（空文件
+  error 77、无关证书 error 60，默认 CA 目录不兜底）；openssl s_client 走
+  file∪dir union（坏 file 被 dir 兜底仍绿）；node 只追加。
 
 ## 六、与两份前作的关系
 

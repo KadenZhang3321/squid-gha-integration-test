@@ -9,6 +9,7 @@
 #   - 通过 --mode 选择阶段组，与 .github/workflows/test-squid.yaml 的各 job 对应：
 #       function    —— squid 功能：代理/隧道/MITM、缓存 MISS→HIT、完整性、失败面
 #       concurrency —— 并发：同对象阶梯、异对象阶梯、混合工具并行
+#       cabundle    —— no_proxy 直连 × CA 注入矩阵（独立脚本 no-proxy-ca-test.sh）
 #
 # 用法：
 #   bash test-squid/run-suite.sh --mode function
@@ -1236,6 +1237,12 @@ elif [ "$MODE" = "imagebuild" ]; then
     run_timed ib-catlass        "$LAYER" ib-catlass
     run_timed ib-tarballs       "$LAYER" ib-tarballs
     run_timed ib-vllm-gitproxy  "$LAYER" ib-vllm-gitproxy
+elif [ "$MODE" = "cabundle" ]; then
+    # no_proxy 直连 × CA 注入变量组矩阵（runner/容器两层）：
+    # CA 形态取证 + no_proxy 生效性 + 排他/union/追加三语义工具的直连/MITM 双路径
+    run_timed env-snapshot      "$LAYER" env-snapshot
+    run_timed meta-trace        "$LAYER" meta-trace
+    run_timed cabundle-matrix   "$LAYER" bash "$SCRIPT_DIR/no-proxy-ca-test.sh"
 elif [ "$MODE" = "tools" ]; then
     # pip --user 装的 CLI（uv/modelscope 等）落 ~/.local/bin，极简镜像 PATH 默认不含
     export PATH="$HOME/.local/bin:$PATH"
@@ -1259,7 +1266,7 @@ elif [ "$MODE" = "tools" ]; then
         run_timed tool-precommit "$LAYER" tool-precommit
     fi
 else
-    echo "未知 mode: $MODE（可选 function | concurrency | vllm | parity | upstream | imagebuild | tools）" >&2
+    echo "未知 mode: $MODE（可选 function | concurrency | vllm | parity | upstream | imagebuild | cabundle | tools）" >&2
     exit 2
 fi
 

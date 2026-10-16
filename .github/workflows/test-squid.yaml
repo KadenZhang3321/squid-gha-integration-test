@@ -15,6 +15,8 @@
 #                  不测不过 squid 的流量）
 #   imagebuild  —— 镜像构建网络模拟（vllm-ascend Dockerfile.310p 外网面：
 #                  catlass 子模块 + cmake 第三方压缩包 + GIT_PROXY clone vllm）
+#   cabundle    —— no_proxy 直连 × CA 注入矩阵（排他/union/追加三语义工具，
+#                  CA 形态取证 + no_proxy 生效性 + 直连/MITM 双路径）
 #   miss-p95    —— SquidMissP95Slow 告警假慢复现（broker 长轮询 hold 顶爆
 #                  MISS p95 的口径缺陷，test-squid/repro-miss-p95.sh）
 #   tools       —— 真实工具链 e2e（no-mirror-test tool-* 移植：零镜像配置，
@@ -298,6 +300,29 @@ jobs:
           path: /tmp/test-squid-results/
           if-no-files-found: warn
 
+  cabundle:
+    name: no_proxy × CA 注入矩阵
+    # 平台向 pod 注入 6 个 CA 变量（全指向 /etc/squid-ca/squid-ca.pem）：排他
+    # CAfile（CURL_CA_BUNDLE/REQUESTS_CA_BUNDLE/GIT_SSL_CAINFO/PIP_CERT）、
+    # 库级 union（SSL_CERT_FILE）、追加（NODE_EXTRA_CA_CERTS）。风险：no_proxy
+    # 命中 → 直连 → 对端是公共 CA 证书，排他变量若指向纯 squid CA（无公共根）
+    # 则直连断裂。本组取证 CA 文件形态（纯 CA vs bundle）+ no_proxy 生效性 +
+    # 工具×路径矩阵（test-squid/no-proxy-ca-test.sh）
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 运行 no_proxy × CA 矩阵
+        run: bash test-squid/run-suite.sh --mode cabundle
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-squid-cabundle
+          path: /tmp/test-squid-results/
+          if-no-files-found: warn
+
   miss-p95:
     name: MISS p95 假慢复现（broker 长轮询诊断）
     # 2026-10-09 SquidMissP95Slow 告警诊断的复现场景：GHA runner 保活长轮询
@@ -373,9 +398,31 @@ jobs:
           path: /tmp/test-squid-results/
           if-no-files-found: warn
 
+  container-cabundle:
+    name: 容器层·no_proxy × CA 注入矩阵（CANN 镜像）
+    needs: [cabundle, container-imagebuild]
+    # 容器内 env 由 postStart/CA 卷注入同一组变量，多验一层 CA 信任路径与
+    # 镜像内工具链（python/pip/git）的排他语义表现
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 运行 no_proxy × CA 矩阵（容器层）
+        run: bash test-squid/run-suite.sh --mode cabundle --container
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-squid-container-cabundle
+          path: /tmp/test-squid-results/
+          if-no-files-found: warn
+
   summary:
     name: 汇总
-    needs: [function, concurrency, vllm, parity, tools, upstream, imagebuild, miss-p95, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95, container-imagebuild]
+    needs: [function, concurrency, vllm, parity, tools, upstream, imagebuild, cabundle, miss-p95, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95, container-imagebuild, container-cabundle]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -389,8 +436,8 @@ jobs:
         if: always()
         run: |
           echo "## test-squid 汇总" >> "$GITHUB_STEP_SUMMARY"
-          for d in test-squid-function test-squid-concurrency test-squid-vllm test-squid-parity test-squid-upstream test-squid-imagebuild test-squid-tools test-squid-miss-p95 \
-                   test-squid-container-function test-squid-container-concurrency test-squid-container-vllm test-squid-container-tools test-squid-container-miss-p95 test-squid-container-imagebuild; do
+          for d in test-squid-function test-squid-concurrency test-squid-vllm test-squid-parity test-squid-upstream test-squid-imagebuild test-squid-cabundle test-squid-tools test-squid-miss-p95 \
+                   test-squid-container-function test-squid-container-concurrency test-squid-container-vllm test-squid-container-tools test-squid-container-miss-p95 test-squid-container-imagebuild test-squid-container-cabundle; do
             if [ -f "$d/timings.tsv" ] || [ -f "$d/probes.tsv" ]; then
               echo "### $d" >> "$GITHUB_STEP_SUMMARY"
               echo '```' >> "$GITHUB_STEP_SUMMARY"
