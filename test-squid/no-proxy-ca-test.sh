@@ -89,6 +89,34 @@ export PIP_CERT="$CA"
 export NODE_EXTRA_CA_CERTS="$CA"
 
 # ---------------------------------------------------------------------------
+# 2.5 工具 bootstrap：极简 runner 镜像缺 python 工具链/node 时临时补装
+#     （job 级安装不污染镜像；失败静默 → 对应格 SKIP，不影响其余矩阵）
+#     背景（2026-10-16）：runner 层此前全绿是"SKIP 躲过 requests 直连腿"的
+#     假绿——容器层已实证 requests-direct TLS-FAIL（排他 CA + 纯 squid CA）。
+#     runner 层装齐后同格预期同红，矩阵不再依赖容器层代答。
+# ---------------------------------------------------------------------------
+SUDO=""
+if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
+apt_install() { # apt_install <pkg>（install 失败时 update 后重试一次）
+    $SUDO apt-get install -y -q "$1" >/dev/null 2>&1 && return 0
+    $SUDO apt-get update -q >/dev/null 2>&1
+    $SUDO apt-get install -y -q "$1" >/dev/null 2>&1
+}
+if command -v python3 >/dev/null 2>&1 && ! python3 -c 'import requests' 2>/dev/null; then
+    log "bootstrap: python3 缺 requests → 尝试补装"
+    if apt_install python3-requests || python3 -m pip install --user -q requests >/dev/null 2>&1; then
+        python3 -c 'import requests' 2>/dev/null && log "bootstrap: requests 就绪"
+    fi
+fi
+if command -v python3 >/dev/null 2>&1 && ! python3 -m pip --version >/dev/null 2>&1 \
+   && ! command -v pip3 >/dev/null 2>&1 && ! command -v pip >/dev/null 2>&1; then
+    apt_install python3-pip && log "bootstrap: pip 就绪"
+fi
+if ! command -v node >/dev/null 2>&1; then
+    apt_install nodejs && command -v node >/dev/null 2>&1 && log "bootstrap: nodejs 就绪"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. probe 封装：执行命令并按 stderr/stdout 分类
 #    OK / TLS-FAIL（证书信任断裂）/ OTHER-ERR（网络/协议等）/ SKIP
 # ---------------------------------------------------------------------------
@@ -172,10 +200,13 @@ if [ -n "$PX" ]; then
         skip requests-proxy proxy "python3/requests 不可用"
     fi
 
-    if command -v pip3 >/dev/null 2>&1 || command -v pip >/dev/null 2>&1; then
-        PIP_BIN="$(command -v pip3 || command -v pip)"
+    PIP_BIN=""
+    command -v pip3 >/dev/null 2>&1 && PIP_BIN="$(command -v pip3)"
+    [ -z "$PIP_BIN" ] && command -v pip >/dev/null 2>&1 && PIP_BIN="$(command -v pip)"
+    [ -z "$PIP_BIN" ] && python3 -m pip --version >/dev/null 2>&1 && PIP_BIN="python3 -m pip"
+    if [ -n "$PIP_BIN" ]; then
         # PIP_CERT + MITM（走代理拉一个小包）
-        probe pip-proxy proxy "$PIP_BIN" download --no-deps -q -d /tmp/np-ca-test --proxy "$PX" six
+        probe pip-proxy proxy $PIP_BIN download --no-deps -q -d /tmp/np-ca-test --proxy "$PX" six
     else
         skip pip-proxy proxy "pip 不可用"
     fi

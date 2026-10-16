@@ -252,6 +252,16 @@ cmake 拉包与 vllm clone 发生在 build 容器内——runner 层验链路，
 本地冒烟：`CA=/etc/ssl/certs/ca-certificates.crt bash test-squid/no-proxy-ca-test.sh`
 （本机无 squid-ca.pem，用系统 bundle 验脚本逻辑；无代理 env 时 proxy 腿 SKIP）。
 
+工具 bootstrap：极简 runner 镜像缺 requests/pip/node 时矩阵开头 apt 临时补装
+（job 级不污染镜像，失败静默 SKIP）。2026-10-16 首轮实证（run 38866669159）：
+- runner 层全绿是"SKIP 躲过 requests"的假绿——curl 8.5.0 对 SSL_CERT_FILE 走
+  file∪dir union（dir 兜底公共根）所以 curl-direct OK，但 requests/node/pip 全缺
+- 容器层（CANN，工具链齐全）**实爆**：`requests-direct` TLS-FAIL（排他
+  REQUESTS_CA_BUNDLE + 纯 squid CA + no_proxy 直连），同格 requests-proxy OK
+  ——直连红 MITM 绿，坐实"纯 squid CA 挤掉公共根"
+- 根修方向：平台侧把 `squid-ca.pem` 换成 bundle（squid CA + 公共根拼接），
+  让排他/union/追加三种语义全部自洽；runner 层 bootstrap 装齐后同格预期同红
+
 ## 结论口径
 
 - **PASS**：判定项全部达标（缓存 MISS→HIT 无缓存头等"数据记录"场景不阻断结论，但计入数据）。
