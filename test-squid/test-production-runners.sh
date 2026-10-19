@@ -76,6 +76,7 @@ trigger_one() {  # trigger_one <标签> → stdout: run_id
     local extra=()
     [ -n "$HEAVY" ]  && extra+=(-f heavy="$HEAVY")
     [ -n "$LADDER" ] && extra+=(-f ladder="$LADDER")
+    [ -n "$BUNDLE_FIX" ] && extra+=(-f bundle_fix="$BUNDLE_FIX")
     if ! gh workflow run "$WF" --repo "$REPO" --ref main \
             -f runner="[\"$label\"]" ${extra+"${extra[@]}"}; then
         echo "TRIGGER_FAIL"
