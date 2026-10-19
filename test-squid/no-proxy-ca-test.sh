@@ -112,11 +112,24 @@ PYEOF
             log "### BUNDLE_FIX: 系统 bundle（$SYS_BUNDLE）已含 squid CA → 6 个 CA 变量直接重指向它（零合成）"
             CA="$SYS_BUNDLE"
         else
+            n_sys=$(grep -c 'BEGIN CERTIFICATE' "$SYS_BUNDLE" 2>/dev/null); n_sys=${n_sys:-0}
             COMPOSITE="$RESULTS_DIR/composite-ca-bundle.pem"
-            cat "$CA" "$SYS_BUNDLE" > "$COMPOSITE"
+            # ⚠️ ConfigMap 挂载的 squid-ca.pem 末尾常无换行符——直接 cat 拼接会把
+            # END CERTIFICATE 与下一张 MII... 粘成一行 → 坏 PEM → curl error 77
+            # （run 38880372240 实证，3 条腿连带全红）。拼接前保障尾换行：
+            # tail -c 1 经命令替换后非空 = 最后字节不是换行 → 补一个换行。
+            { cat "$CA"; [ -n "$(tail -c 1 "$CA")" ] && echo; cat "$SYS_BUNDLE"; } > "$COMPOSITE"
             n_comp=$(grep -c 'BEGIN CERTIFICATE' "$COMPOSITE" 2>/dev/null); n_comp=${n_comp:-0}
-            log "### BUNDLE_FIX: 系统 bundle 不含 squid CA → 拼接合成（squid CA($n_certs) + $SYS_BUNDLE → $COMPOSITE，$n_comp 张）"
-            CA="$COMPOSITE"
+            # 拼接自检：① BEGIN 张数 = 两输入之和；② 行边界干净（BEGIN/END 必须独占行，
+            # 计数抓不住粘连——本次 bug 即计数通过但 END 粘注释导致解析崩）
+            if [ "$n_comp" -ne $((n_certs + n_sys)) ] \
+               || grep -q -- '-----BEGIN CERTIFICATE-----[^[:space:]]' "$COMPOSITE" \
+               || grep -q -- '-----END CERTIFICATE-----[^[:space:]]' "$COMPOSITE"; then
+                log "### BUNDLE_FIX: 拼接自检失败（BEGIN=$n_comp/$((n_certs + n_sys)) 或存在粘连行）→ composite 坏 PEM，跳过 fix 保持原 CA"
+            else
+                log "### BUNDLE_FIX: 系统 bundle 不含 squid CA → 拼接合成（squid CA($n_certs) + $SYS_BUNDLE → $COMPOSITE，$n_comp 张）"
+                CA="$COMPOSITE"
+            fi
         fi
         n_ca=$(grep -c 'BEGIN CERTIFICATE' "$CA" 2>/dev/null); n_ca=${n_ca:-0}
         log "### BUNDLE_FIX: 最终 CA = $CA（$n_ca 张）→ 直连/MITM 双兼容预期 ✅"
