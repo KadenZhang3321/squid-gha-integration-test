@@ -2,8 +2,7 @@
 # =============================================================================
 # no-proxy-ca-test.sh —— no_proxy 直连 × CA 注入变量组 矩阵测试
 #
-# 背景：平台向 runner / 工作负载 pod 注入一组 CA 环境变量，全部指向
-#       /etc/squid-ca/squid-ca.pem（squid MITM CA）。按工具实现分三类语义：
+# 背景：平台向 runner / 工作负载 pod 注入一组 CA 环境变量。按工具实现分三类语义：
 #
 #   语义                          变量                            工具
 #   ----------------------------------------------------------------
@@ -15,18 +14,30 @@
 #     （file∪dir，dir 仍生效）                                    (s_client 等)
 #   追加（不替换内置 Mozilla 根）  NODE_EXTRA_CA_CERTS             node
 #
+# 注入形态两代（PR opensourceways/ascend-ci-deployment#2017 分界，2026-10-19）：
+#   旧（legacy）：5 个替换型全部指向 /etc/squid-ca/squid-ca.pem（纯 squid CA，
+#                 1 张）——排他语义工具的 no_proxy 直连腿必断（缺陷指纹）
+#   新（bundle）：5 个替换型指向 /etc/ca-bundle/squid-bundle.pem（postStart 由
+#                 inject-squid-ca.sh 合成：系统 bundle + squid CA，emptyDir 落盘）
+#                 ——直连/MITM 双兼容；NODE_EXTRA_CA_CERTS 追加语义两代都指单证书
+#   接线状态仅 gy-006（PR #2017），生产 runner 仍为 legacy → 本测试按实际 env
+#   自动识别形态并给出对应判定口径（见 1.2 节）。
+#
 # 风险点：no_proxy 命中 → 流量直连 → 对端证书由公共 CA 签发。若排他变量
 #         指向的文件不含公共根，直连 TLS 校验断裂（curl error 60/77、
 #         requests SSLError 等）——squid 本身无恙，是注入形态问题。
 #         （2026-10-16 本机实测钉死语义：curl 8.22 对 SSL_CERT_FILE 走
 #         排他加载（空文件 error 77 / 无关证书 error 60，dir 不兜底）；
 #         s_client/OpenSSL 3.6 走 file∪dir union；node 只追加。）
+#         新形态新增风险：bundle 文件由 postStart 生成——未挂 emptyDir /
+#         postStart 未跑 / 合成自检失败时文件缺失或坏 PEM → 所有 TLS 腿断。
 #
-# 本测试做三件事：
-#   1. CA 文件形态取证：纯 squid CA（1 张证书）还是 bundle（squid CA+公共根）
-#      —— bundle 是"直连与 MITM 双兼容"的唯一自洽形态
-#   2. no_proxy 生效性：api.github.com 是否真的绕开 squid（无 CONNECT 行）
-#   3. 工具 × 路径矩阵：直连（公共证书）/ 经 squid（MITM 重签）
+# 本测试做四件事：
+#   1. CA 文件形态取证：纯 squid CA（1 张）还是 bundle（squid CA+公共根）
+#   2. 注入接线判定：pod env 实际指向 legacy 还是 bundle 形态（PR #2017）
+#   3. no_proxy 生效性：api.github.com 是否真的绕开 squid（无 CONNECT 行）
+#   4. 工具 × 路径矩阵：直连（公共证书）/ 经 squid（MITM 重签）；两种形态下
+#      TLS-FAIL 都判红——legacy 红 = 暴露已知缺陷，bundle 红 = 接线/合成真故障
 #
 # 用法：
 #   bash test-squid/no-proxy-ca-test.sh                  # runner 上跑（pod env 已注入）
@@ -49,10 +60,18 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 # ---------------------------------------------------------------------------
 # 0. CA 文件与代理目标
+#    CA 目标解析优先级：显式 CA= > pod 注入的替换型 env（PR #2017 新形态下
+#    即 /etc/ca-bundle/squid-bundle.pem）> 传统默认（纯 squid CA）
 # ---------------------------------------------------------------------------
-CA="${CA:-/etc/squid-ca/squid-ca.pem}"
+CA="${CA:-${REQUESTS_CA_BUNDLE:-${SSL_CERT_FILE:-/etc/squid-ca/squid-ca.pem}}}"
 if [ ! -r "$CA" ]; then
-    log "❌ CA 文件不可读: $CA（用 CA=<path> 覆盖；本地冒烟可传 /etc/ssl/certs/ca-certificates.crt）"
+    case "$CA" in
+        *squid-bundle.pem)
+            log "❌ CA 文件不可读: $CA —— PR #2017 新形态：env 已指向 /etc/ca-bundle/squid-bundle.pem 但文件不存在"
+            log "   → 检查该 runner set 是否挂了 ca-bundle emptyDir、postStart 是否调用 inject-squid-ca.sh、合成是否失败" ;;
+        *)
+            log "❌ CA 文件不可读: $CA（用 CA=<path> 覆盖；本地冒烟可传 /etc/ssl/certs/ca-certificates.crt）" ;;
+    esac
     exit 1
 fi
 
@@ -78,19 +97,42 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 1.5 BUNDLE_FIX 实验（BUNDLE_FIX=1 启用）：不等平台侧改 Secret，就地验证
-#     "CA 变量指向含 squid CA 的系统 bundle"的修复可行性——即 postStart
-#     临时修复形态。判定系统 bundle 是否已含 squid CA（SHA256 指纹比对）：
+# 1.2 注入接线判定（PR #2017）：pod env 的替换型变量实际指向哪一代形态
+#     bundle接线 = env 指向 squid-bundle.pem 且文件为多张 bundle → 全矩阵
+#                  预期绿，TLS-FAIL 即真故障（接线/合成问题）
+#     legacy    = env 指向纯 squid-ca.pem → requests-direct 预期红（已知
+#                 缺陷指纹；红不是套件误报，是暴露平台未接线）
+#     broken接线 = env 指向 squid-bundle.pem 但文件缺失/单张 → 0 节已报错退出
+# ---------------------------------------------------------------------------
+INJ_FORM="legacy"
+case "$(basename "$CA")" in
+    squid-bundle.pem)
+        if [ "$n_certs" -ge 2 ]; then
+            INJ_FORM="bundle"
+            log "### 接线判定: bundle 形态（PR #2017 已接线）→ 全矩阵预期绿 ✅"
+        fi ;;
+    squid-ca.pem)
+        [ "$n_certs" -eq 1 ] && log "### 接线判定: legacy 形态（PR #2017 未接线到本 runner set）→ requests-direct 预期红 ⚠️" ;;
+esac
+export NP_CA_INJ_FORM="$INJ_FORM"
+
+# ---------------------------------------------------------------------------
+# 1.5 BUNDLE_FIX 实验（BUNDLE_FIX=1 启用）：仅对 legacy 形态环境有意义——
+#     不等平台侧接线，就地验证"CA 变量指向含 squid CA 的系统 bundle"的修复
+#     可行性。判定系统 bundle 是否已含 squid CA（SHA256 指纹比对）：
 #     已含 → 全部 CA 变量直接重指向系统 bundle（零合成）；
 #     不含 → 拼接兜底（squid CA + 系统 bundle → composite 文件再指向）。
-#     注意：不是 ln——symlink 无法合并两个文件的内容，必须拼接。
+#     bundle 形态（PR #2017 已接线）下自动跳过。
 # ---------------------------------------------------------------------------
 if [ "${BUNDLE_FIX:-0}" = "1" ]; then
-    SYS_BUNDLE=""
-    for c in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
-        [ -r "$c" ] && SYS_BUNDLE="$c" && break
-    done
-    if [ -n "$SYS_BUNDLE" ]; then
+    if [ "$INJ_FORM" = "bundle" ]; then
+        log "### BUNDLE_FIX: 已是 bundle 形态（PR #2017 接线生效），跳过实验"
+    else
+        SYS_BUNDLE=""
+        for c in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+            [ -r "$c" ] && SYS_BUNDLE="$c" && break
+        done
+        if [ -n "$SYS_BUNDLE" ]; then
         match=$(python3 - "$CA" "$SYS_BUNDLE" <<'PYEOF' 2>/dev/null
 import sys, hashlib
 def certs(path):
@@ -133,8 +175,9 @@ PYEOF
         fi
         n_ca=$(grep -c 'BEGIN CERTIFICATE' "$CA" 2>/dev/null); n_ca=${n_ca:-0}
         log "### BUNDLE_FIX: 最终 CA = $CA（$n_ca 张）→ 直连/MITM 双兼容预期 ✅"
-    else
-        log "### BUNDLE_FIX: 未找到系统 CA bundle（试过 ca-certificates.crt/ca-bundle.crt/cert.pem），跳过合成"
+        else
+            log "### BUNDLE_FIX: 未找到系统 CA bundle（试过 ca-certificates.crt/ca-bundle.crt/cert.pem），跳过合成"
+        fi
     fi
 fi
 
@@ -291,10 +334,19 @@ other_err=$(awk -F'\t' 'NR>1 && $4=="OTHER-ERR"' "$TSV" | wc -l)
 if [ "$tls_fail" -gt 0 ]; then
     log "❌ 存在 $tls_fail 个 TLS-FAIL："
     awk -F'\t' 'NR>1 && $4=="TLS-FAIL" {print "    - " $1 " / " $2}' "$TSV"
-    log "   直连腿红 = 排他 CA 变量挤掉公共根（squid-ca.pem 需为 squid CA+公共根 bundle）"
-    log "   代理腿红 = MITM 信任断裂（CA 文件缺 squid CA 或未注入到工具）"
+    if [ "$INJ_FORM" = "bundle" ]; then
+        log "   bundle 接线形态（PR #2017）下不应出现 TLS-FAIL → 检查 /etc/ca-bundle 合成产物"
+        log "   （postStart 是否执行、emptyDir 是否挂载、合成自检是否通过、squid CA 是否轮换未重合成）"
+    else
+        log "   legacy 形态：直连腿红 = 已知缺陷指纹（排他 CA 变量挤掉公共根），接线 PR #2017 后转绿"
+        log "   legacy 形态下代理腿红才是异常（MITM 信任断裂：CA 文件缺 squid CA 或未注入到工具）"
+    fi
     exit 1
 fi
 [ "$other_err" -gt 0 ] && log "⚠️ $other_err 个 OTHER-ERR（网络/协议层，记录不判红）"
-log "✅ 全部 TLS 校验通过（直连与 MITM 双路径自洽；CA 形态见开头取证行）"
+if [ "$INJ_FORM" = "bundle" ]; then
+    log "✅ bundle 形态（PR #2017）：直连（公共根）与 MITM（squid CA）双路径全绿——同一信任源自洽"
+else
+    log "✅ 全部 TLS 校验通过（直连与 MITM 双路径自洽；CA 形态见开头取证行）"
+fi
 exit 0
