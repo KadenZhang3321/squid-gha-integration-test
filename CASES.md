@@ -158,7 +158,8 @@ gy-006 的 squid 启用 `url_rewrite_program`：客户端零镜像配置，官�
 |---|---|---|
 | pypi-simple / pypi-packages（动态取真实 wheel） | 规则1/12：索引页 + files.pythonhosted 对象域 | 200/206 + 相对路径或官方 URL |
 | gh-archive / gh-release / gh-raw | 规则3/13：gh-proxy 前缀式 | gzip 魔数 `1f8b08` / ELF 魔数 `7f454c46` / 200 |
-| goproxy-list / go-tarball / go-json | 规则5：goproxy.cn 同构 / aliyun tarball / `?mode=json` 分流 | `^v` / gzip / `"` version` JSON（tool-18 事故回归位，R15） |
+| goproxy-list / go-tarball / go-json | 规则5：goproxy.cn 同构 / tarball→dl.google.com / `?mode=json`→golang.google.cn | `^v` / gzip / `"` version` JSON（tool-18 事故回归位，R15） |
+| go-json-query / go-json-cn / go-tarball-cn / go-dl-page | 规则5b：`?mode=json` 保留完整 query / 中国镜像入口自我改写规避 / 第二入口 `golang.google.cn/dl/go*` / `/dl/` 下载页边界守卫 | 真 JSON 可解析（`json.load`，2026-09-20 JSONDecodeError 事故形态）/ 真 JSON / gzip `/dl/` 不得命中 `/dl/go*`（200 + HTML） |
 | ubuntu-release / ports-release | 规则6：apt host 交换 | `Origin: Ubuntu` |
 | npm-doc / npm-tgz | 规则7：registry.npmmirror host 交换 | `"versions"` / gzip |
 | crates-index / crates-config / crates-static | 规则8：rsproxy sparse index | `"vers"` / `api/v1/crates` 模板漂移守卫（R15，**策略自适应**：rewrite 正向 / direct 反向）/ gzip |

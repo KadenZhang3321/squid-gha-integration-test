@@ -617,6 +617,43 @@ ck_head() {  # 大文件只 HEAD（conda repodata 等百 MB 级）
     fi
 }
 
+ck_json() {  # name url [must_key] —— 200/206 + 真 JSON 可解析
+    # 事故形态（2026-09-20 gy-002）：?mode=json 被重写到镜像目录页 → 拿到 HTML
+    # → pre-commit _infer_go_version 抛 JSONDecodeError。只 grep 引号关键字会漏，
+    # 这里做 json.load 真解析；不带 range（include=all 响应可达数百 KB，截断会崩）。
+    local name=$1 url=$2 key=${3:-}
+    local body="$RESULTS_DIR/parity-body" code
+    code=$(curl -sS -L --max-time 90 -o "$body" -w '%{http_code}' "$url" 2>>"$RESULTS_DIR/parity.log")
+    case "$code" in
+        200|206) : ;;
+        *) echo "✗ $name [$url] GET=$code（JSON 通道异常）"; P_FAIL=$((P_FAIL+1)); return 1 ;;
+    esac
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if (not sys.argv[2]) or (sys.argv[2] in json.dumps(d)) else 1)' "$body" "$key" 2>/dev/null \
+            || { echo "✗ $name JSON 解析失败或缺少 /$key/（重写落点拿到 HTML 目录页？）"; P_FAIL=$((P_FAIL+1)); return 1; }
+    else
+        grep -q '"version"' "$body" \
+            || { echo "✗ $name 缺 /\"version\"/ 签名（python3 缺失，降级 grep 判定）"; P_FAIL=$((P_FAIL+1)); return 1; }
+    fi
+    echo "✓ $name GET=$code JSON 可解析"; P_PASS=$((P_PASS+1))
+}
+
+ck_page() {  # name url —— 下载页守卫：必须 200 + HTML（防 /dl/ 被误改写成 /dl/go*）
+    local name=$1 url=$2 body="$RESULTS_DIR/parity-body" code magic
+    code=$(curl -sS -L --max-time 60 -o "$body" -w '%{http_code}' "$url" 2>>"$RESULTS_DIR/parity.log")
+    magic=$(od -An -tx1 -N4 "$body" 2>/dev/null | tr -d ' \n')
+    if [ "$code" != "200" ]; then
+        echo "✗ $name [$url] GET=$code 期望=200 ← 下载页被误改写（规则3 应只匹配 /dl/go*）"; P_FAIL=$((P_FAIL+1)); return 1
+    fi
+    case "$magic" in
+        1f8b08*) echo "✗ $name 返回 gzip 二进制而非 HTML ← /dl/ 被误改写"; P_FAIL=$((P_FAIL+1)); return 1 ;;
+    esac
+    grep -qi '<html' "$body" || { echo "✗ $name 非 HTML 形态（magic=$magic）← /dl/ 被误改写"; P_FAIL=$((P_FAIL+1)); return 1; }
+    echo "✓ $name GET=$code HTML 形态（下载页未被误改写）"; P_PASS=$((P_PASS+1))
+}
+
 neg_expect_404() {  # 负样本：故意错误映射，期望 404/403
     local name=$1 url=$2 code
     code=$(curl -sS -L --max-time 60 -o /dev/null -w '%{http_code}' "$url" 2>>"$RESULTS_DIR/parity.log")
@@ -671,10 +708,20 @@ rewrite-parity() {
     ck_get gh-release https://github.com/mvdan/sh/releases/download/v3.10.0/shfmt_v3.10.0_linux_amd64 200 7f454c46
     ck_get gh-raw https://raw.githubusercontent.com/mvdan/sh/master/README.md 200
 
-    echo "--- 规则5 go：goproxy.cn 同构 / tarball→aliyun / ?mode=json 分流（R15 守卫）---"
+    echo "--- 规则5 go：goproxy.cn 同构 / tarball→dl.google.com / ?mode=json→golang.google.cn（R15 守卫）---"
     ck_get goproxy-list https://proxy.golang.org/github.com/google/uuid/@v/list 200 '' '^v'
     ck_get go-tarball https://go.dev/dl/go1.26.1.linux-amd64.tar.gz 200 1f8b08
     ck_get go-json "https://go.dev/dl/?mode=json" 200 '' '"version"'   # tool-18 事故回归位
+
+    echo "--- 规则5b go 下载通道细分（2026-10-20 redirect 更新后新增守卫）---"
+    # 规则1：?mode=json → golang.google.cn（保留完整 query）；判定升级为真 JSON 解析
+    ck_json go-json-query "https://go.dev/dl/?mode=json&include=all" '"version"'
+    # 规则2：golang.google.cn 入口原样放行（防自我改写循环）
+    ck_json go-json-cn "https://golang.google.cn/dl/?mode=json" '"version"'
+    # 规则3：go* 二进制 → dl.google.com；第二入口（golang.google.cn/dl/go*）零覆盖补齐
+    ck_get go-tarball-cn https://golang.google.cn/dl/go1.26.1.linux-amd64.tar.gz 200 1f8b08
+    # 规则3 边界守卫：/dl/ 下载页不得命中 /dl/go*（${url##*/} 为空会拼出 dl.google.com/go/）
+    ck_page go-dl-page https://go.dev/dl/
 
     echo "--- 规则6 apt → repo.huaweicloud.com（host 交换，路径同构）---"
     ck_get ubuntu-release http://archive.ubuntu.com/ubuntu/dists/noble/Release 200 '' 'Origin: Ubuntu'
