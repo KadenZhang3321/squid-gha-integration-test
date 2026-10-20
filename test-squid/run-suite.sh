@@ -21,6 +21,7 @@
 #   HEAVY         1=启用大载荷（~146MB torch wheel，默认 0）
 #   URL_SMALL/URL_MED/URL_HEAVY   三档载荷 URL（真实 URL、mock 大小）
 #   CATLASS_COMMIT/IB_GIT_PROXY/IB_VLLM_REF   imagebuild 组参数（见下文定义处）
+#   TORCH_INDEX_URL/HF_MIRROR_ENDPOINT/MS_DATASET  tools 组特殊通道参数（见定义处）
 #
 # 输出（RESULTS_DIR 下）：
 #   timings.tsv   阶段<TAB>秒<TAB>状态(0/1/SKIP)<TAB>组
@@ -65,6 +66,15 @@ URL_HEAVY="${URL_HEAVY:-https://files.pythonhosted.org/packages/78/89/f5554b13eb
 CATLASS_COMMIT="${CATLASS_COMMIT:-41bf90da655bba3c66d0acd7e00abe33960ecfd6}"
 IB_GIT_PROXY="${IB_GIT_PROXY:-https://gh-proxy.test.osinfra.cn/}"
 IB_VLLM_REF="${IB_VLLM_REF:-v0.11.0}"
+
+# 上游仓库真实 CI 面（2026-10-20，按 sgl-project / vllm-project / volcengine /
+# fla-org / hiyouga / alibaba 等仓库 workflow 实测增补）：
+#   TORCH_INDEX_URL     torch 官方索引（规则11：pytorch 官方源不重写，经 squid 直通）
+#   HF_MIRROR_ENDPOINT  sglang NPU CI 显式 HF_ENDPOINT（真实 CI 现状复刻，见 META R12 注记）
+#   MS_DATASET          vllm-ascend / sglang 数据集通道样例（modelscope --dataset）
+TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+HF_MIRROR_ENDPOINT="${HF_MIRROR_ENDPOINT:-https://hf-mirror.com}"
+MS_DATASET="${MS_DATASET:-vllm-ascend/gsm8k-lite}"
 
 mkdir -p "$RESULTS_DIR"
 TSV="$RESULTS_DIR/timings.tsv"
@@ -993,17 +1003,83 @@ EOF
     echo "✅ pre-commit+gitleaks 官方 hook 链经 squid 通过"
 }
 
-# modelscope 真实 CLI 下载（vllm-ascend CI 首选通道，天然 302→CDN）
+# modelscope 真实 CLI 下载（vllm-ascend / sglang CI 首选通道，天然 302→CDN）
+# 模型 + 数据集双通道：sglang/vllm-ascend workflow 里两者是不同 API 面
+# （--model 走 models/...，--dataset 走 datasets/...），都要经 squid。
 tool-modelscope() {
     ensure_pip || { echo "❌ pip 不可用且 bootstrap 失败"; return 1; }
     pip_install 'modelscope<1.38' > "$RESULTS_DIR/tool-modelscope.log" 2>&1
     local dir="$RESULTS_DIR/ms-model"; rm -rf "$dir"
     modelscope download --model Qwen/Qwen2.5-0.5B config.json generation_config.json \
         --local_dir "$dir" >> "$RESULTS_DIR/tool-modelscope.log" 2>&1 \
-        || { echo "❌ modelscope download 失败（tail: $(tail -2 "$RESULTS_DIR/tool-modelscope.log" | tr '\n' ' ')）"; return 1; }
+        || { echo "❌ modelscope download（model）失败（tail: $(tail -2 "$RESULTS_DIR/tool-modelscope.log" | tr '\n' ' ')）"; return 1; }
     [ -s "$dir/config.json" ] || { echo "❌ config.json 缺失/为空"; return 1; }
     grep -q 'qwen' "$dir/config.json" || { echo "❌ config.json 内容异常"; return 1; }
-    echo "✅ modelscope CLI 真实下载经 squid 通过"
+    local ds="$RESULTS_DIR/ms-dataset"; rm -rf "$ds"
+    modelscope download --dataset "$MS_DATASET" --local_dir "$ds" >> "$RESULTS_DIR/tool-modelscope.log" 2>&1 \
+        || { echo "❌ modelscope download（dataset $MS_DATASET）失败（tail: $(tail -2 "$RESULTS_DIR/tool-modelscope.log" | tr '\n' ' ')）"; return 1; }
+    local jsonl
+    jsonl=$(find "$ds" -type f -name '*.jsonl' -size +0 2>/dev/null | head -1)
+    [ -n "$jsonl" ] || { echo "❌ dataset $MS_DATASET 未产出非空 jsonl"; return 1; }
+    head -1 "$jsonl" | python3 -c 'import json,sys; json.loads(sys.stdin.read())' 2>/dev/null \
+        || { echo "❌ dataset jsonl 首行非法：$(basename "$jsonl")"; return 1; }
+    echo "✅ modelscope CLI 真实下载经 squid 通过（model + dataset $MS_DATASET）"
+}
+
+# torch 官方索引（download.pytorch.org）——sglang / ROLL / LLaMA-Factory / fla /
+# sgl-kernel-npu 的真实装法：pip/uv --index-url https://download.pytorch.org/whl/{cpu,xpu}。
+# 规则11 明确 pytorch 官方源不重写 → 该流量经 squid 直通（不依赖 helper），
+# 日常只做索引可达 + 版本解析；HEAVY=1 才真下 wheel（~200MB，冷拉可能很慢）。
+tool-torch() {
+    ensure_pip || { echo "❌ pip 不可用且 bootstrap 失败"; return 1; }
+    local log="$RESULTS_DIR/tool-torch.log"
+    if python3 -m pip index versions torch --index-url "$TORCH_INDEX_URL" > "$log" 2>&1 \
+        && grep -q 'Available versions' "$log"; then
+        echo "torch 索引可达（$TORCH_INDEX_URL）：$(sed -n 's/^Available versions: *//p' "$log" | head -1 | cut -d, -f1)"
+    else
+        # 老 pip 无 index 子命令：直接读索引页（HTML 列表）
+        local body="$RESULTS_DIR/torch-index.html" code
+        code=$(curl -sS -L --max-time 60 -o "$body" -w '%{http_code}' "$TORCH_INDEX_URL/torch/" 2>>"$log")
+        [ "$code" = "200" ] && grep -q 'torch-' "$body" \
+            || { echo "❌ torch 索引不可用（pip index 与索引页均失败，HTTP $code）"; return 1; }
+        echo "torch 索引页可达（HTTP $code；pip index 不可用已回退）"
+    fi
+    if [ "$HEAVY" = "1" ]; then
+        local d="$RESULTS_DIR/torch-wheel"; rm -rf "$d"; mkdir -p "$d"
+        echo "HEAVY=1 → 真实下载 torch CPU wheel（官方索引，冷拉 ~200MB 可能较慢）"
+        timeout 3600 python3 -m pip download --no-deps --timeout 300 -d "$d" torch \
+            --index-url "$TORCH_INDEX_URL" >> "$log" 2>&1 \
+            || { echo "❌ torch wheel 下载失败/超时（tail: $(tail -2 "$log" | tr '\n' ' ')）"; return 1; }
+        local whl
+        whl=$(ls "$d"/torch-*.whl 2>/dev/null | head -1)
+        [ -n "$whl" ] || { echo "❌ 未产出 torch wheel"; return 1; }
+        [ "$(od -An -tx1 -N4 "$whl" | tr -d ' \n')" = "504b0304" ] \
+            || { echo "❌ 下载内容非 ZIP/wheel（魔数不符）"; return 1; }
+        echo "✅ torch wheel 完整（$(basename "$whl") $(du -h "$whl" | cut -f1)）"
+    fi
+    echo "✅ torch 官方索引经 squid 通过"
+}
+
+# hf CLI（huggingface_hub）——sglang / Ascend-sglang / sglang-omni 的 NPU CI 显式
+# 设置 HF_ENDPOINT=https://hf-mirror.com 后 `hf download` / snapshot_download。
+# 该维度是「真实 CI 现状复刻」，不参与 no-mirror（R12）判定；镜像 URL 原样保留。
+# HF_HUB_DISABLE_XET=1：hf-mirror 不支持 Xet 传输，真实 CI 同样走 HTTP 回落。
+tool-hf() {
+    ensure_pip || { echo "❌ pip 不可用且 bootstrap 失败"; return 1; }
+    pip_install -U 'huggingface_hub[cli]' > "$RESULTS_DIR/tool-hf.log" 2>&1 \
+        || { echo "❌ huggingface_hub[cli] 安装失败（tail: $(tail -2 "$RESULTS_DIR/tool-hf.log" | tr '\n' ' ')）"; return 1; }
+    local cmd=""
+    command -v hf >/dev/null 2>&1 && cmd=hf
+    [ -z "$cmd" ] && command -v huggingface-cli >/dev/null 2>&1 && cmd=huggingface-cli
+    [ -n "$cmd" ] || { echo "❌ hf / huggingface-cli 均不在 PATH"; return 1; }
+    local dir="$RESULTS_DIR/hf-model"; rm -rf "$dir"
+    HF_ENDPOINT="$HF_MIRROR_ENDPOINT" HF_HUB_DISABLE_XET=1 \
+        "$cmd" download Qwen/Qwen2.5-0.5B config.json generation_config.json \
+        --local-dir "$dir" >> "$RESULTS_DIR/tool-hf.log" 2>&1 \
+        || { echo "❌ hf download 失败（tail: $(tail -2 "$RESULTS_DIR/tool-hf.log" | tr '\n' ' ')）"; return 1; }
+    [ -s "$dir/config.json" ] || { echo "❌ hf 未落盘 config.json"; return 1; }
+    grep -qi 'qwen' "$dir/config.json" || { echo "❌ hf 下载内容异常"; return 1; }
+    echo "✅ hf CLI + $HF_MIRROR_ENDPOINT（真实 CI 复刻）经 squid 通过"
 }
 
 # git 真实 clone —— no-mirror 直连 github.com（runner 层）/ insteadOf 重写 gh-proxy（容器层）
@@ -1300,10 +1376,12 @@ elif [ "$MODE" = "tools" ]; then
     run_timed tool-npm          "$LAYER" tool-npm
     run_timed tool-pnpm         "$LAYER" tool-pnpm
     run_timed tool-uv           "$LAYER" tool-uv
+    run_timed tool-torch        "$LAYER" tool-torch
     run_timed tool-goproxy      "$LAYER" tool-goproxy
     run_timed tool-wget         "$LAYER" tool-wget
     run_timed tool-gitlfs       "$LAYER" tool-gitlfs
     run_timed tool-modelscope   "$LAYER" tool-modelscope
+    run_timed tool-hf           "$LAYER" tool-hf
     run_timed tool-git          "$LAYER" tool-git
     if [ "${HEAVY:-0}" = "1" ]; then
         run_timed tool-rustup    "$LAYER" tool-rustup

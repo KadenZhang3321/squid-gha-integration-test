@@ -89,7 +89,7 @@ gh workflow run test-squid.yaml --repo ascend-gha-runners/squid-gha-integration-
 | `上游通道健康` | gh-proxy 延迟预算（p50≤5s，A/B 对照）+ read_timeout 数据留档（R17，runner 层 only；Actions 构件通道已入 NO_PROXY 直连，不测不过 squid 的流量） |
 | `镜像构建网络模拟` | vllm-ascend Dockerfile.310p 外网面复刻（R18）：catlass 子模块（gitcode.com pinned commit）+ cmake 第三方压缩包（cann-src-third-party ×5 两遍拉取 sha256 比对）+ GIT_PROXY insteadOf clone vllm（大 pack 吞吐） |
 | `no_proxy × CA 注入矩阵` | CA 形态取证（纯 squid CA vs bundle）+ no_proxy 生效性 + 排他/union/追加三语义工具的直连/MITM 双路径矩阵（R19，独立脚本 no-proxy-ca-test.sh；TLS-FAIL 红、OTHER-ERR/SKIP 不判红） |
-| `真实工具链 e2e` | 真实客户端工具（pip/apt/npm/uv/go/wget/git-lfs/modelscope/git）零镜像配置跑通；`heavy=1` 追加 rustup/conda/cmake/bazel/precommit |
+| `真实工具链 e2e` | 真实客户端工具（pip/apt/npm/uv/go/wget/git-lfs/modelscope/model+dataset/git）零镜像配置跑通；另复刻上游仓库 CI 现状：`download.pytorch.org` torch 索引、`hf download` + `HF_ENDPOINT=hf-mirror.com`；`heavy=1` 追加 torch wheel 全量下载 + rustup/conda/cmake/bazel/precommit |
 | `容器层·*（CANN 镜像）` | 功能/并发/vllm/工具链/miss-p95/镜像构建/no_proxy×CA 矩阵七组在 `cann:9.0.0-a3-ubuntu22.04-py3.12` 容器里各跑一遍（多验 CA 信任路径 + 镜像内 gitconfig 形态）；容器层 job 用 needs 链串行（container hook 并发挂死竞态，issue #2） |
 | `汇总` | 聚合全部 job 结果表到 GITHUB_STEP_SUMMARY |
 

@@ -79,6 +79,12 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   加速只能来自 squid 服务端 url_rewrite；任何 case 显式写镜像 URL 即违例
   （前车之鉴：tool-hf 曾写死 HF_ENDPOINT=hf-mirror.com，已删；huggingface
   无重写规则，按原套件决策整体排除）。
+  **真实 CI 复刻注记（2026-10-20）**：`projects/*` 上游仓库 workflow 本身存在显式
+  镜像与特殊官方索引（sglang NPU CI 的 `HF_ENDPOINT=hf-mirror.com`、各仓库的
+  `download.pytorch.org/whl/{cpu,xpu}`、`mirrors.aliyun/tuna`）。这些写法在 tools 组
+  以「真实 CI 现状复刻」维度原样保留并单独标注，不参与 R12 no-mirror 判定；
+  no-mirror 判定仍由 parity 与 tools 的零镜像阶段承担。obsutil（triton-ascend
+  OBS CLI）按用户决定暂不纳入。
   **范围注记（2026-10-08 hk-001 实测修正）**：重写是 CN 出口集群的策略；
   HK 等海外出口集群直连 origin 更快，不配置重写属正常。同构校验（R13/R15）
   必须策略自适应：以唯一无歧义的镜像特征（crates `api/v1/crates`）自探测

@@ -168,22 +168,29 @@ gy-006 的 squid 启用 `url_rewrite_program`：客户端零镜像配置，官�
 | rustup-manifest / rustup-init | 规则10a：huaweicloud 固定映射 | `manifest-version` / HEAD 200 |
 | NEG conda-nocloud（故意错映射，直连镜像） | R14 负样本 | 期望 404/403：证明判定方法有效 |
 
-### tools 组（真实工具链 e2e，no-mirror 形态移植）
+### tools 组（真实工具链 e2e：no-mirror 移植 + 上游仓库 CI 现状复刻）
 
-no-mirror-test tool-* 用例剥环境壳移植（R16：业务命令零镜像配置原样保留）。
-工具链缺失记 SKIP（数据），在而失败记 FAIL。`HEAVY=1` 追加编译/工具链级重场景。
-runner 与 CANN 容器层各跑一遍。
+两个并存维度，判定口径分开：
+1. **no-mirror 形态**（R16 移植）：业务命令零镜像配置，加速只靠 squid 服务端重写；
+2. **真实 CI 现状复刻**（2026-10-20 增补）：按 `projects/*` 上游仓库 workflow 的实际写法
+   原样执行——含显式 `HF_ENDPOINT=hf-mirror.com`、`download.pytorch.org` 索引等。
+   该维度只回答"这些仓库的真实流量经 squid 是否可用"，不参与 R12 no-mirror 判定。
 
-| 阶段 | 对应原用例 | 场景（零镜像配置） | 规则 |
+工具链缺失记 SKIP（数据），在而失败记 FAIL。`HEAVY=1` 追加编译/工具链级重场景与
+torch wheel 全量下载。runner 与 CANN 容器层各跑一遍。
+
+| 阶段 | 对应原用例 | 场景 | 规则 |
 |---|---|---|---|
 | `tool-pip` | tool-01 | pip 官方 index 下载→安装→import（极简 runner 缺 pip 时 ensurepip/apt 兜底，兜底本身也是真实 apt 链路） | R12、R13 |
 | `tool-apt` | tool-02 | 官方源零换源 `apt-get update && install jq` | 规则6 |
 | `tool-npm` / `tool-pnpm` | tool-09/15 | 默认 registry 安装 express / bootstrap pnpm 后安装 | 规则7 |
 | `tool-uv` | tool-12 | pip bootstrap uv + uv pip install | 规则1 |
+| `tool-torch` | —（上游仓库增补） | `download.pytorch.org/whl/cpu` 索引可达 + 版本解析；`HEAVY=1` 全量下载 torch wheel 并校验 ZIP 魔数（规则11：pytorch 官方源不重写，经 squid 直通） | 规则11、R13 |
 | `tool-goproxy` | tool-04 | go 缺失时官方 tarball bootstrap（squid 大文件下载）+ `go mod download` | 规则5 |
 | `tool-wget` | tool-06 | 官方 github release wget + ELF 魔数 | 规则3 |
 | `tool-gitlfs` | tool-14 | git-lfs 官方 release bootstrap（curl，极简镜像无 wget） | 规则3 |
-| `tool-modelscope` | —（vllm-ascend 增补） | modelscope CLI 官方源下载 Qwen config（天然 302→CDN） | R12 |
+| `tool-modelscope` | —（vllm-ascend/sglang 增补） | modelscope CLI 双通道：model `Qwen/Qwen2.5-0.5B` config + dataset `vllm-ascend/gsm8k-lite`（jsonl 首行 JSON 校验） | R12 |
+| `tool-hf` | —（sglang NPU CI 复刻） | `hf download` + `HF_ENDPOINT=hf-mirror.com`（`HF_HUB_DISABLE_XET=1` 对齐镜像 HTTP 回落） | 真实 CI 复刻（不参与 R12） |
 | `tool-git` | tool-03 | github.com 直连 clone（runner 层 no-mirror 形态；容器层 insteadOf 走 gh-proxy，两形态都记录） | R12 |
 | `tool-rustup`（heavy） | tool-19 | sh.rustup.rs bootstrap + cargo serde 构建 | 规则10a、8 |
 | `tool-conda`（heavy） | tool-11 | miniconda 官方 installer + conda-forge numpy | 规则9 |
@@ -191,9 +198,9 @@ runner 与 CANN 容器层各跑一遍。
 | `tool-bazel`（heavy） | tool-08 | bazelisk（官方 release）+ bazel_dep 构建 | 规则3 |
 | `tool-precommit`（heavy） | tool-18 | pre-commit + gitleaks 官方 hook repo | 规则3 |
 
-排除留档（R16）：tool-13 huggingface（helper 无 hf 规则，前版显式 hf-mirror 违例已删）、
-tool-16 yum（GHA/CANN 均 ubuntu，无 openEuler 基底）、tool-17 docker-pull 与
-tool-20 buildkit（需 docker/buildkitd 服务端，机制不同归 e2e 平台测试）。
+排除留档（R16）：tool-16 yum（GHA/CANN 均 ubuntu，无 openEuler 基底）、
+tool-17 docker-pull 与 tool-20 buildkit（需 docker/buildkitd 服务端，机制不同归 e2e 平台测试）。
+obsutil（triton-ascend OBS CLI）按用户决定暂不纳入（2026-10-20）。
 
 ### upstream 组（上游通道健康，R17，runner 层 only）
 
