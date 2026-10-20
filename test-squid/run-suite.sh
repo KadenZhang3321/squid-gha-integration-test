@@ -21,6 +21,8 @@
 #   HEAVY         1=启用大载荷（~146MB torch wheel，默认 0）
 #   URL_SMALL/URL_MED/URL_HEAVY   三档载荷 URL（真实 URL、mock 大小）
 #   CATLASS_COMMIT/IB_GIT_PROXY/IB_VLLM_REF   imagebuild 组参数（见下文定义处）
+#   OBS_CANN_URL/OBS_CANN_REFERER/OBS_COV_JSON/OBS_COV_TGZ/OBS_ELF_URL/OBS_NEG_URL
+#                                             OBS 静态资产通道（见下文定义处）
 #   TORCH_INDEX_URL/HF_MIRROR_ENDPOINT/MS_DATASET  tools 组特殊通道参数（见定义处）
 #
 # 输出（RESULTS_DIR 下）：
@@ -408,6 +410,14 @@ px_curl() {  # px_curl <curl 参数…>（无代理 env 时去掉 -x，本地冒
         curl -sS --max-time 60 -x "$PX" "$@"
     else
         curl -sS --max-time 60 "$@"
+    fi
+}
+
+obs_curl() {  # OBS 静态对象：Range 可快，HEAVY 全量 16MB 级给足 600s
+    if [ -n "$PX" ]; then
+        curl -sS --max-time 600 -x "$PX" "$@"
+    else
+        curl -sS --max-time 600 "$@"
     fi
 }
 
@@ -1318,6 +1328,144 @@ ib-vllm-gitproxy() {
     fi
 }
 
+# ④ OBS 静态资产：CANN 安装包 + CI 覆盖率工件 + 代码扫描二进制（R18 镜像构建外网面）
+#    OBS 域名不在重写规则内（META 规则11 官方源直通），流量经 squid MITM 打到 origin：
+#    验 ① Range/HEAD 语义不被 MITM 破坏 ② 静态对象内容形态正确 ③ 负样本确实失败
+OBS_CANN_URL="${OBS_CANN_URL:-https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.1.0/Ascend-cann-toolkit_9.1.0_linux-ARCH.run}"
+OBS_CANN_REFERER="${OBS_CANN_REFERER:-https://www.hiascend.com/}"
+OBS_COV_JSON="${OBS_COV_JSON:-https://sglang-npu.obs.cn-southwest-2.myhuaweicloud.com/coverage/test_case_map.json}"
+OBS_COV_TGZ="${OBS_COV_TGZ:-https://sglang-npu.obs.cn-southwest-2.myhuaweicloud.com/coverage/outputs.tar.gz}"
+OBS_ELF_URL="${OBS_ELF_URL:-https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta-codecheck/gitleaks}"
+OBS_NEG_URL="${OBS_NEG_URL:-https://sglang-npu.obs.cn-southwest-2.myhuaweicloud.com/coverage/__squid_negative_sample__.json}"
+
+ib-ascend-obs() {
+    local bad=0 arch url out code t hdr magic b0 cl rc bin
+    case "$PKG_ARCH" in amd64) arch="x86_64" ;; arm64) arch="aarch64" ;; *) arch="x86_64" ;; esac
+    echo "--- myhuaweicloud OBS 静态资产（CANN .run / 覆盖率工件 / 代码扫描二进制）---"
+
+    # ① CANN toolkit .run：vllm-ascend / CANN 镜像构建必装，脚本带 Referer 防盗链。
+    #    Range 前 32 字节取 bash 魔数；HEAD 的 Content-Length 证明大对象元数据完整
+    url="${OBS_CANN_URL/ARCH/$arch}"
+    hdr="$RESULTS_DIR/obs-cann.hdr"; rm -f "$hdr" "$RESULTS_DIR/obs-cann.head"
+    out=$(obs_curl -D "$hdr" --max-filesize 1048576 -H "Referer: $OBS_CANN_REFERER" \
+          -r 0-31 -o "$RESULTS_DIR/obs-cann.head" -w '%{http_code} %{time_total}' "$url")
+    code=${out%% *}; t=${out##* }
+    printf '%s\t%s\t%s\n' "$url" "$code" "$t" >> "$PROBES"
+    if [ "$code" = "404" ] && [ "$arch" != "x86_64" ]; then
+        echo "⚠️ CANN $arch 安装包 URL 未命中（404，命名可能变更），跳过该架构子项"
+    elif [ "$code" != "206" ]; then
+        echo "❌ CANN .run Range 异常：http=$code（期望 206——MITM 下 Range 语义被破坏或防盗链拒绝）$url"
+        bad=$((bad+1))
+    elif [ "$(head -c 2 "$RESULTS_DIR/obs-cann.head" 2>/dev/null)" != "#!" ]; then
+        echo "❌ CANN .run 前 32 字节不是 #!（内容错乱/错误页）：$(head -c 40 "$RESULTS_DIR/obs-cann.head" | tr -d '\0' | tr '\n' ' ')"
+        bad=$((bad+1))
+    else
+        cl=$(obs_curl -sSI --max-time 60 -H "Referer: $OBS_CANN_REFERER" "$url" \
+             | grep -ai '^content-length:' | tail -1 | tr -dc '0-9')
+        printf 'obs-cann\t%s\t%s\tRange32=206 len=%s\n' "$url" "$t" "${cl:-N/A}" >> "$RESULTS_DIR/imagebuild-cache.tsv"
+        if [ -n "$cl" ] && [ "$cl" -gt 100000000 ]; then
+            echo "✅ CANN .run：Range 32B 魔数 #!，Content-Length $cl 字节（${t}s，经 ${PX:-直连}）"
+        else
+            echo "❌ CANN .run Content-Length 异常（${cl:-取不到}，期望 >100MB——大对象元数据被截断）"
+            bad=$((bad+1))
+        fi
+    fi
+
+    # ② CI 覆盖率索引 JSON（sglang-npu / vllm-ascend 工件通道，~20–25MB）：
+    #    Range 首字节判 JSON 形态；X-Cache-Lookup/X-Cache/Via 只留档不判 HIT
+    hdr="$RESULTS_DIR/obs-json.hdr"; rm -f "$hdr" "$RESULTS_DIR/obs-json.b0"
+    out=$(obs_curl -D "$hdr" --max-filesize 1048576 -r 0-0 -o "$RESULTS_DIR/obs-json.b0" \
+          -w '%{http_code} %{time_total}' "$OBS_COV_JSON")
+    code=${out%% *}; t=${out##* }
+    printf '%s\t%s\t%s\n' "$OBS_COV_JSON" "$code" "$t" >> "$PROBES"
+    b0=$(cat "$RESULTS_DIR/obs-json.b0" 2>/dev/null)
+    local xc
+    xc=$(grep -aiE '^(x-cache-lookup|x-cache|via):' "$hdr" 2>/dev/null | tr -d '\r' | tr '\n' ' ' | cut -c1-200)
+    if [[ "$code" = 2* ]] && { [ "$b0" = "{" ] || [ "$b0" = "[" ]; }; then
+        printf 'obs-json\t%s\t%s\tfirst_byte=%s %s\n' "$OBS_COV_JSON" "$t" "$b0" "${xc:-无缓存头}" >> "$RESULTS_DIR/imagebuild-cache.tsv"
+        echo "✅ 覆盖率 JSON 首字节 $b0（${t}s；缓存头留档：${xc:-无}）"
+    else
+        echo "❌ 覆盖率 JSON 形态异常：http=$code 首字节=[$b0]"
+        bad=$((bad+1))
+    fi
+
+    # ③ 覆盖率打包工件 tar.gz：gzip 魔数；HEAVY=1 两遍全量 sha256（~16MB，
+    #    同对象复拉 → 缓存内容完整性，判定口径对齐 ib-tarballs）
+    out=$(obs_curl --max-filesize 1048576 -r 0-2 -o "$RESULTS_DIR/obs-tgz.b0" \
+          -w '%{http_code} %{time_total}' "$OBS_COV_TGZ")
+    code=${out%% *}; t=${out##* }
+    printf '%s\t%s\t%s\n' "$OBS_COV_TGZ" "$code" "$t" >> "$PROBES"
+    magic=$(od -An -tx1 -N3 "$RESULTS_DIR/obs-tgz.b0" 2>/dev/null | tr -d ' \n')
+    if [[ "$code" = 2* ]] && [ "$magic" = "1f8b08" ]; then
+        echo "✅ 覆盖率 tar.gz gzip 魔数 1f8b08（${t}s）"
+    else
+        echo "❌ 覆盖率 tar.gz 魔数异常：http=$code magic=${magic:-空}"
+        bad=$((bad+1))
+    fi
+    if [ "$HEAVY" = "1" ]; then
+        local f1="$RESULTS_DIR/obs-tgz.r1" f2="$RESULTS_DIR/obs-tgz.r2" c1 c2 h1 h2
+        rm -f "$f1" "$f2"
+        c1=$(obs_curl -o "$f1" -w '%{http_code}' "$OBS_COV_TGZ")
+        c2=$(obs_curl -o "$f2" -w '%{http_code}' "$OBS_COV_TGZ")
+        h1=$(sha256_of "$f1"); h2=$(sha256_of "$f2")
+        if [[ "$c1" = 2* && "$c2" = 2* ]] && [ -s "$f1" ] && [ "$h1" = "$h2" ]; then
+            printf 'obs-tgz\t%s\t%s\tr1/r2 sha256 一致\n' "$OBS_COV_TGZ" "$h1" >> "$RESULTS_DIR/imagebuild-cache.tsv"
+            echo "✅ 覆盖率 tar.gz 两遍全量 sha256 一致（$h1）"
+        else
+            echo "❌ 覆盖率 tar.gz 两遍全量不一致（r1=$c1 r2=$c2 $h1 vs $h2）——缓存内容完整性存疑"
+            bad=$((bad+1))
+        fi
+    else
+        echo "⚠️ 覆盖率 tar.gz 全量 sha256 未做（HEAVY=0，仅验魔数）"
+    fi
+
+    # ④ gitleaks 单文件二进制：真实 CI 形态是 wget --no-check-certificate 拉取后直接执行
+    if [ "$arch" != "x86_64" ]; then
+        echo "⚠️ gitleaks 仅发布 x86_64 产物，$arch 跳过"
+    else
+        bin="$RESULTS_DIR/gitleaks"; rm -f "$bin"
+        if command -v wget >/dev/null 2>&1; then
+            wget -q --no-check-certificate --timeout=120 -O "$bin" "$OBS_ELF_URL" 2>"$RESULTS_DIR/obs-elf.err"
+            rc=$?
+        else
+            obs_curl -o "$bin" "$OBS_ELF_URL" 2>"$RESULTS_DIR/obs-elf.err"
+            rc=$?
+        fi
+        magic=$(od -An -tx1 -N4 "$bin" 2>/dev/null | tr -d ' \n')
+        if [ "$rc" -ne 0 ]; then
+            echo "❌ gitleaks 下载失败（rc=$rc）：$(head -c 160 "$RESULTS_DIR/obs-elf.err" | tr '\n' ' ')"
+            bad=$((bad+1))
+        elif [ "$magic" != "7f454c46" ]; then
+            echo "❌ gitleaks 不是 ELF（magic=${magic:-空}，可能是 OBS 错误页）"
+            bad=$((bad+1))
+        else
+            chmod +x "$bin"
+            out=$("$bin" version 2>&1 | head -1)
+            if [ -n "$out" ]; then
+                echo "✅ gitleaks ELF 可执行：$out（$(wc -c < "$bin") 字节）"
+            else
+                echo "❌ gitleaks ELF 完整但无法执行（架构/依赖不匹配）"
+                bad=$((bad+1))
+            fi
+        fi
+    fi
+
+    # ⑤ 负样本（R3/F6）：不存在的 key 必须 403/404，证明上面的 2xx 判定不是恒真
+    out=$(obs_curl --max-filesize 1048576 -o /dev/null -w '%{http_code} %{time_total}' "$OBS_NEG_URL")
+    code=${out%% *}; t=${out##* }
+    printf '%s\t%s\t%s\n' "$OBS_NEG_URL" "$code" "$t" >> "$PROBES"
+    if [ "$code" = "403" ] || [ "$code" = "404" ]; then
+        echo "✅ 负样本：不存在 key 返回 $code（判定方法有效）"
+    else
+        echo "❌ 负样本：不存在 key 返回 $code（期望 403/404——2xx 判定可能恒真）"
+        bad=$((bad+1))
+    fi
+
+    [ "$bad" -eq 0 ] || return 1
+    echo "⚠️ X-Cache-Lookup/X-Cache/Via 仅留档（imagebuild-cache.tsv），OBS 静态对象 HIT/MISS 不判结论"
+    return 0
+}
+
 # =============================================================================
 # 主流程
 # =============================================================================
@@ -1360,6 +1508,7 @@ elif [ "$MODE" = "imagebuild" ]; then
     run_timed ib-catlass        "$LAYER" ib-catlass
     run_timed ib-tarballs       "$LAYER" ib-tarballs
     run_timed ib-vllm-gitproxy  "$LAYER" ib-vllm-gitproxy
+    run_timed ib-ascend-obs     "$LAYER" ib-ascend-obs
 elif [ "$MODE" = "cabundle" ]; then
     # no_proxy 直连 × CA 注入变量组矩阵（runner/容器两层）：
     # CA 形态取证 + no_proxy 生效性 + 排他/union/追加三语义工具的直连/MITM 双路径

@@ -226,24 +226,29 @@ runner 层 only 的原因：gh-proxy 是 runner 环境关心的事，与执行�
 
 背景（2026-10-14）：vllm-ascend 的 Image Build and Push（_schedule_image_build.yaml
 + Dockerfile.310p）是 runner 集群上最重的真实外网负载之一，出网面里过 squid 的
-有三路——catlass 子模块（gitcode.com）、cmake 第三方压缩包
+有四路——catlass 子模块（gitcode.com）、cmake 第三方压缩包
 （gitcode.com/cann-src-third-party，`COMPILE_CUSTOM_KERNELS=1` 即 csrc 缓存
 miss 时触发）、GIT_PROXY 形态 clone vllm（github.com 经 gh-proxy insteadOf
-重写）。本组用真实 commit/tag/REQ_URL 复刻这三路（外网面全量口径）；集群内
-cache-service（pypi/yum/rustup/crates）已入 NO_PROXY 直连，不测不过 squid 的流量。
+重写）、CANN/OBS 静态资产（`ascend-repo.obs` 安装包 + CI 工件桶，2026-10-20
+增补）。本组用真实 commit/tag/REQ_URL/对象键复刻这四路（外网面全量口径）；
+集群内 cache-service（pypi/yum/rustup/crates）已入 NO_PROXY 直连，不测不过
+squid 的流量。
 
 | 阶段 | 场景 | 判定 | 规则 |
 |---|---|---|---|
 | `ib-catlass` | `git fetch --depth 1` 固定 commit（`CATLASS_COMMIT`，.gitmodules pinned）拉 gitcode.com/cann/catlass（checkout submodules:recursive 形态） | fetch 成功 + 工作区内容落盘（>10 文件）；pinned commit 被托管端拒绝时回退默认分支 depth1（⚠️ 降级数据点，不判失败） | R18 |
 | `ib-tarballs` | cmake REQ_URL 5 个 release 压缩包（abseil-cpp/protobuf/googletest/json/makeself）两遍拉取；明细落 probes.tsv + imagebuild-cache.tsv | 两遍均 2xx + sha256 一致（缓存内容完整性）；Cache-Status 仅留档不判结论（可缓存性取决于 refresh_pattern） | R18 |
 | `ib-vllm-gitproxy` | gitconfig `url.<GIT_PROXY>https://github.com/.insteadOf` + `clone --depth 1 -b <tag>`（Dockerfile L86/L92 形态，大 pack 吞吐）；tag 预检不存在自动取最新 tag | clone 成功 + 工作区 >100 文件 | R18 |
+| `ib-ascend-obs` | myhuaweicloud OBS 静态资产四类：CANN toolkit `.run`（带 `Referer` 防盗链，Range 32B + HEAD Content-Length）、CI 覆盖率 JSON（Range 首字节）、覆盖率 `outputs.tar.gz`（gzip 魔数；`HEAVY=1` 两遍全量 sha256）、gitleaks 单文件 ELF（`wget --no-check-certificate` 形态，下载后执行 `version`） | Range 必须 206 且魔数正确（`#!` / `{` / `1f8b08` / `7f454c46`）；CANN 包 Content-Length >100MB；HEAVY 两遍 sha256 一致；负样本不存在 key 必须 403/404（R3）；`X-Cache-Lookup`/`Via` 仅留档不判 HIT | R18、R3、F6 |
 
 两层口径：真实构建里 catlass checkout 发生在 runner workspace（build 之前）、
-cmake 拉包与 vllm clone 发生在 build 容器内——runner 层验链路，容器层验
-「镜像内 gitconfig insteadOf（环境正道）+ CA 信任路径」下三路全通，其中
+cmake 拉包、OBS 资产下载与 vllm clone 发生在 build 容器内——runner 层验链路，
+容器层验「镜像内 gitconfig insteadOf（环境正道）+ CA 信任路径」下四路全通，其中
 `ib-vllm-gitproxy` 在容器层与真实构建执行环境一致。参数可覆盖：
-`CATLASS_COMMIT` / `IB_GIT_PROXY` / `IB_VLLM_REF`（`IB_GIT_PROXY` 置空 =
-直连，本地冒烟逃生门）。
+`CATLASS_COMMIT` / `IB_GIT_PROXY` / `IB_VLLM_REF` / `OBS_CANN_URL` /
+`OBS_CANN_REFERER` / `OBS_COV_JSON` / `OBS_COV_TGZ` / `OBS_ELF_URL` /
+`OBS_NEG_URL`（`IB_GIT_PROXY` 置空 = 直连，本地冒烟逃生门）。OBS 域名不在
+重写规则内（META 规则11 官方源直通），因此该阶段是**不经重写的 MITM 直通**样本。
 
 ### cabundle 组（no_proxy × CA 注入矩阵，R19，runner + 容器两层）
 

@@ -134,6 +134,15 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   两层口径（2026-10-14 增补）：真实构建里 catlass checkout 在 runner workspace
   （build 之前）、cmake 拉包与 vllm clone 在 build 容器内——runner 层验链路，
   容器层验镜像内 gitconfig insteadOf（环境正道）+ CA 信任路径下三路全通。
+  **OBS 静态资产增补（2026-10-20）**：镜像构建与 NPU CI 的另一条真实外网面是
+  myhuaweicloud OBS 静态对象——CANN toolkit `.run`（`ascend-repo.obs`，脚本带
+  `Referer: https://www.hiascend.com/` 防盗链）、CI 覆盖率工件（`sglang-npu.obs`
+  / `vllm-ascend.obs` 的 JSON 与 tar.gz）、代码扫描单文件二进制（`gitleaks`，
+  CI 用 `wget --no-check-certificate` 拉取后直接执行）。这些域名不在 url_rewrite
+  规则内（规则 11 官方源直通），所以是**不经重写的 MITM 直通**样本：验 Range
+  语义（206）与 HEAD 元数据不被 bump 破坏、大对象内容魔数正确、单文件 ELF 可执行，
+  并按 R3 配一条不存在 key 的负样本（必须 403/404）。OBS 对象是否可缓存仍只
+  留档不判结论（同 refresh_pattern 口径）。
 - **R19 no_proxy 直连 × CA 注入形态自洽**（2026-10-16，源自平台 CA 注入变量组
   排查）：平台向 pod 注入 6 个 CA 变量（全指向 /etc/squid-ca/squid-ca.pem），
   按工具实现分三类语义——排他 CAfile（CURL_CA_BUNDLE / REQUESTS_CA_BUNDLE /
