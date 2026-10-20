@@ -138,8 +138,11 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   myhuaweicloud OBS 静态对象——CANN toolkit `.run`（`ascend-repo.obs`，脚本带
   `Referer: https://www.hiascend.com/` 防盗链）、CI 覆盖率工件（`sglang-npu.obs`
   / `vllm-ascend.obs` 的 JSON 与 tar.gz）、代码扫描单文件二进制（`gitleaks`，
-  CI 用 `wget --no-check-certificate` 拉取后直接执行）。这些域名不在 url_rewrite
-  规则内（规则 11 官方源直通），所以是**不经重写的 MITM 直通**样本：验 Range
+  CI 用 `wget --no-check-certificate` 拉取后直接执行）。重写 helper 没有 OBS
+  分支（规则 11 已把 OBS 明确划入不重写范围），请求命中规则 12 兜底原样放行
+  `OK`；同时 `acl registry` 只含 `swr.*` 等镜像仓库域，OBS 域名走
+  `ssl_bump bump all` → 属于**经 squid MITM 解密但不重写**的样本（不是不过
+  squid 的直连）：验 Range
   语义（206）与 HEAD 元数据不被 bump 破坏、大对象内容魔数正确、单文件 ELF 可执行，
   并按 R3 配一条不存在 key 的负样本（必须 403/404）。OBS 对象是否可缓存仍只
   留档不判结论（同 refresh_pattern 口径）。

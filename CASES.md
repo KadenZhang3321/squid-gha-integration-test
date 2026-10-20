@@ -247,8 +247,10 @@ cmake 拉包、OBS 资产下载与 vllm clone 发生在 build 容器内——run
 `ib-vllm-gitproxy` 在容器层与真实构建执行环境一致。参数可覆盖：
 `CATLASS_COMMIT` / `IB_GIT_PROXY` / `IB_VLLM_REF` / `OBS_CANN_URL` /
 `OBS_CANN_REFERER` / `OBS_COV_JSON` / `OBS_COV_TGZ` / `OBS_ELF_URL` /
-`OBS_NEG_URL`（`IB_GIT_PROXY` 置空 = 直连，本地冒烟逃生门）。OBS 域名不在
-重写规则内（META 规则11 官方源直通），因此该阶段是**不经重写的 MITM 直通**样本。
+`OBS_NEG_URL`（`IB_GIT_PROXY` 置空 = 直连，本地冒烟逃生门）。重写 helper 无
+OBS 分支（规则 11 把 OBS 划入不重写范围），实际命中规则 12「白名单外原样放行」；
+`acl registry` 仅含 `swr.*` 等镜像仓库域，故 OBS 域名走 `ssl_bump bump all`——
+该阶段是**经 squid MITM 解密但不重写**的样本，不是不过 squid 的直连。
 
 ### cabundle 组（no_proxy × CA 注入矩阵，R19，runner + 容器两层）
 
