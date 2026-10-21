@@ -102,7 +102,8 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
 - **R16 工具 e2e 零改写移植**：no-mirror-test 的 tool-* 真实工具用例移植到 GHA
   时，只剥环境壳（k8s Job → workflow step），**业务命令零镜像配置原样保留**；
   工具链缺失（runner 无该工具）记 SKIP（数据），工具在而执行失败记 FAIL。
-  环境不可行的用例（yum 需 openEuler、buildkit 需服务端）排除并留档。
+  环境不可行的用例（buildkit 需服务端）排除并留档；yum/dnf 改由 openEuler
+  基底容器补充验证（见 R20）。
 - **R17 上游通道集中失败判据**（2026-10-08，源自 cn12-001 runbook 诊断）：
   零散上游超时（如 GitHub Actions 构件通道 9/17 次）是出口固有抖动，单次探测
   失败不得判 FAIL；判 FAIL 只看**单域集中失败**（同域 N 次探测 ≥2/3 失败，
@@ -163,6 +164,16 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   2026-10-16 本机语义实证：curl 8.22 对 SSL_CERT_FILE 走排他加载（空文件
   error 77、无关证书 error 60，默认 CA 目录不兜底）；openssl s_client 走
   file∪dir union（坏 file 被 dir 兜底仍绿）；node 只追加。
+- **R20 dnf/yum 只在原生基底验证**（2026-10-21 增补）：包管理器的源配置、
+  metalink 解析、GPG 校验、RPM 事务都不能靠 curl 模拟——必须用 openEuler/
+  RHEL 基底镜像真实跑。runner 与 CANN 镜像均 ubuntu，套件内 pkg 阶段按 R16
+  记 SKIP；容器层单独一个 openEuler 24.03 job（SWR 华为云副本，多 arch）
+  真实执行 dnf/yum。该形态同时是**唯一覆盖 RHEL 系 CA 信任路径**的样本：
+  注入脚本走 `/etc/pki/ca-trust/source/anchors` + `update-ca-trust extract`，
+  不经任何 CA 环境变量（dnf/librepo 只认系统 trust store，与 Debian 系的
+  `update-ca-certificates` 分叉）。repo 同步面收窄到 OS/everything/EPOL/
+  update 四个源（镜像默认还开 debuginfo/source/update-source，元数据 100MB+
+  且与安装无关），源 URL 保持镜像默认（零换源，R16）。
 
 ## 六、与两份前作的关系
 

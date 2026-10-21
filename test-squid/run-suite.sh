@@ -10,6 +10,7 @@
 #       function    —— squid 功能：代理/隧道/MITM、缓存 MISS→HIT、完整性、失败面
 #       concurrency —— 并发：同对象阶梯、异对象阶梯、混合工具并行
 #       cabundle    —— no_proxy 直连 × CA 注入矩阵（独立脚本 no-proxy-ca-test.sh）
+#       pkg         —— dnf/yum 包管理链路（openEuler 基底容器；RHEL 系 CA 注入路径）
 #
 # 用法：
 #   bash test-squid/run-suite.sh --mode function
@@ -842,6 +843,36 @@ tool-apt() {
     echo "✅ apt 官方源零换源经 squid 通过"
 }
 
+# tool-16 dnf/yum：openEuler 24.03 基底的包管理真实链路（规则10 host 交换域）。
+# GHA/CANN 均 ubuntu 无 dnf → need 守卫记 SKIP（R16 数据记录），
+# 容器层由 openEuler 镜像 job 真实执行（RHEL 系 CA 注入路径的唯一覆盖）。
+# 只启用 OS/everything/EPOL/update 四个 repo：镜像默认还开了 debuginfo/source/
+# update-source（元数据 100MB+ 且与安装无关，全量 makecache 单次 ~5min），
+# 截断只是缩小同步面，URL/源配置保持镜像默认（零换源）。
+PKG_REPOS="${PKG_REPOS:-OS,everything,EPOL,update}"
+
+pkg-dnf() {
+    need dnf || return 2
+    local log="$RESULTS_DIR/pkg-dnf.log"
+    echo "dnf: $(dnf --version 2>/dev/null | head -1)（repo=$PKG_REPOS）"
+    dnf -y --disablerepo='*' --enablerepo="$PKG_REPOS" makecache >> "$log" 2>&1 \
+        || { echo "❌ dnf makecache 失败（tail: $(tail -2 "$log" | tr '\n' ' ')）"; return 1; }
+    dnf -y --disablerepo='*' --enablerepo="$PKG_REPOS" install tree >> "$log" 2>&1 \
+        || { echo "❌ dnf install tree 失败（tail: $(tail -2 "$log" | tr '\n' ' ')）"; return 1; }
+    tree --version >/dev/null 2>&1 || { echo "❌ tree 未落盘/不可执行"; return 1; }
+    echo "✅ dnf 元数据同步 + install 经 squid 通过（$(tree --version | head -1)）"
+}
+
+pkg-yum() {
+    need yum || return 2
+    local log="$RESULTS_DIR/pkg-yum.log"
+    echo "yum: $(yum --version 2>/dev/null | head -1)（repo=$PKG_REPOS）"
+    yum -y --disablerepo='*' --enablerepo="$PKG_REPOS" install jq >> "$log" 2>&1 \
+        || { echo "❌ yum install jq 失败（tail: $(tail -2 "$log" | tr '\n' ' ')）"; return 1; }
+    jq --version >/dev/null 2>&1 || { echo "❌ jq 未落盘/不可执行"; return 1; }
+    echo "✅ yum 安装经 squid 通过（$(jq --version)）"
+}
+
 # tool-09 npm：默认 registry 安装（规则7 host 交换）
 tool-npm() {
     need npm || return 2
@@ -1539,8 +1570,16 @@ elif [ "$MODE" = "tools" ]; then
         run_timed tool-bazel     "$LAYER" tool-bazel
         run_timed tool-precommit "$LAYER" tool-precommit
     fi
+elif [ "$MODE" = "pkg" ]; then
+    # dnf/yum 包管理链路（openEuler 24.03 容器层；RHEL 系 CA 信任路径：
+    # 注入脚本走 /etc/pki/ca-trust/source/anchors + update-ca-trust）
+    run_timed env-snapshot      "$LAYER" env-snapshot
+    run_timed meta-trace        "$LAYER" meta-trace
+    [ "$LAYER" = "container" ] && run_timed ca-trust "$LAYER" ca-trust
+    run_timed pkg-dnf           "$LAYER" pkg-dnf
+    run_timed pkg-yum           "$LAYER" pkg-yum
 else
-    echo "未知 mode: $MODE（可选 function | concurrency | vllm | parity | upstream | imagebuild | cabundle | tools）" >&2
+    echo "未知 mode: $MODE（可选 function | concurrency | vllm | parity | upstream | imagebuild | cabundle | tools | pkg）" >&2
     exit 2
 fi
 

@@ -15,6 +15,7 @@ squid 注入在两种执行形态下必须**都**生效，测试分两层覆盖�
 container 层使用与 CI 真实 workload 相同的镜像：
 `swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12`，
 验证「用户容器里 squid 注入零配置可用」。镜像缺工具（wget/git 等）时记 SKIP 不判失败。
+pkg 组另用 openEuler 24.03 基底镜像（dnf/yum 原生形态，见下文 R20）。
 
 ## 通用约定
 
@@ -198,9 +199,27 @@ torch wheel 全量下载。runner 与 CANN 容器层各跑一遍。
 | `tool-bazel`（heavy） | tool-08 | bazelisk（官方 release）+ bazel_dep 构建 | 规则3 |
 | `tool-precommit`（heavy） | tool-18 | pre-commit + gitleaks 官方 hook repo | 规则3 |
 
-排除留档（R16）：tool-16 yum（GHA/CANN 均 ubuntu，无 openEuler 基底）、
+排除留档（R16）：tool-16 yum 已由 pkg 组在 openEuler 基底容器补齐（R20）；
 tool-17 docker-pull 与 tool-20 buildkit（需 docker/buildkitd 服务端，机制不同归 e2e 平台测试）。
 obsutil（triton-ascend OBS CLI）按用户决定暂不纳入（2026-10-20）。
+
+### pkg 组（dnf/yum，R20，容器层 openEuler 24.03 only）
+
+镜像：`swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03`
+（openEuler 24.03 LTS-SP3，amd64/arm64 多 arch）。dnf/yum 的源解析、metalink、
+GPG 校验与 RPM 事务无法用 curl 模拟，只能在原生基底真实执行；runner 与 CANN
+镜像均 ubuntu，故本组只挂一个容器层 job。镜像不带 git，job 首步用 dnf 装
+`git-core` 引导 checkout（这一步本身就是真实 dnf 安装链路）。
+
+| 阶段 | 场景 | 判定 | 规则 |
+|---|---|---|---|
+| `ca-trust` | 容器内系统信任库是否含 squid CA（此处走 RHEL 路径：anchors + `update-ca-trust extract`） | curl 无 `-k` 验证通过=PASS | F4、R20 |
+| `pkg-dnf` | `dnf makecache` + `dnf install tree`（repo 限定 OS/everything/EPOL/update，源 URL 保持镜像默认） | 两条命令均 0 退出 + `tree --version` 可执行 | 规则10、R20 |
+| `pkg-yum` | `yum install jq`（openEuler 24.03 的 yum 为 dnf 别名，仍验证入口语义） | 0 退出 + `jq --version` 可执行 | 规则10、R20 |
+
+两层口径注记：`pkg-dnf`/`pkg-yum` 在 runner 层与 CANN 容器层记 SKIP（无 dnf，
+R16 数据留档），只有本组为真实执行——即套件里**唯一覆盖 RHEL 系 CA 信任路径**
+（不经 CA 环境变量，dnf/librepo 只认系统 trust store）的样本。
 
 ### upstream 组（上游通道健康，R17，runner 层 only）
 

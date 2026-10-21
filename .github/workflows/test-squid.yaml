@@ -21,6 +21,8 @@
 #                  MISS p95 的口径缺陷，test-squid/repro-miss-p95.sh）
 #   tools       —— 真实工具链 e2e（no-mirror-test tool-* 移植：零镜像配置，
 #                  HEAVY=1 追加 rustup/conda/cmake/bazel/precommit）
+#   pkg         —— dnf/yum 包管理链路（openEuler 24.03 容器层，R20：RHEL 系
+#                  CA 信任路径 + 原生 rpm 源/GPG 校验）
 #   summary     —— 拉回各 job 的 timings/probes，输出汇总表
 # =============================================================================
 name: test-squid
@@ -428,9 +430,38 @@ jobs:
           path: /tmp/test-squid-results/
           if-no-files-found: warn
 
+  container-pkg:
+    name: 容器层·dnf/yum（openEuler 24.03）
+    needs: [container-cabundle]
+    # dnf/yum 只有 openEuler/RHEL 基底才能真实执行（runner 与 CANN 镜像均 ubuntu，
+    # 套件内 pkg 阶段在两处 SKIP）。该镜像不带 git：先 dnf 装 git-core 引导
+    # checkout——这一步本身就是真实 dnf 安装链路（含 GPG key 校验：gpgkey 走
+    # http://repo.openeuler.org，正是规则10 的 yum host 交换域）。
+    # CA 信任走 RHEL 路径：注入脚本 anchors + update-ca-trust extract。
+    # 容器层 job 仍须串行（issue #2 挂死竞态），挂在本链末尾。
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03
+    steps:
+      - name: 引导 git（dnf 真实安装；镜像默认 repo 含 debuginfo/source，仅开 OS）
+        run: dnf -y --disablerepo='*' --enablerepo=OS install git-core
+
+      - uses: actions/checkout@v7
+
+      - name: 运行 dnf/yum 测试（容器层）
+        run: bash test-squid/run-suite.sh --mode pkg --container
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-squid-container-pkg
+          path: /tmp/test-squid-results/
+          if-no-files-found: warn
+
   summary:
     name: 汇总
-    needs: [function, concurrency, vllm, parity, tools, upstream, imagebuild, cabundle, miss-p95, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95, container-imagebuild, container-cabundle]
+    needs: [function, concurrency, vllm, parity, tools, upstream, imagebuild, cabundle, miss-p95, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95, container-imagebuild, container-cabundle, container-pkg]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -445,7 +476,7 @@ jobs:
         run: |
           echo "## test-squid 汇总" >> "$GITHUB_STEP_SUMMARY"
           for d in test-squid-function test-squid-concurrency test-squid-vllm test-squid-parity test-squid-upstream test-squid-imagebuild test-squid-cabundle test-squid-tools test-squid-miss-p95 \
-                   test-squid-container-function test-squid-container-concurrency test-squid-container-vllm test-squid-container-tools test-squid-container-miss-p95 test-squid-container-imagebuild test-squid-container-cabundle; do
+                   test-squid-container-function test-squid-container-concurrency test-squid-container-vllm test-squid-container-tools test-squid-container-miss-p95 test-squid-container-imagebuild test-squid-container-cabundle test-squid-container-pkg; do
             if [ -f "$d/timings.tsv" ] || [ -f "$d/probes.tsv" ]; then
               echo "### $d" >> "$GITHUB_STEP_SUMMARY"
               echo '```' >> "$GITHUB_STEP_SUMMARY"

@@ -91,6 +91,7 @@ gh workflow run test-squid.yaml --repo ascend-gha-runners/squid-gha-integration-
 | `no_proxy × CA 注入矩阵` | CA 形态取证（纯 squid CA vs bundle）+ no_proxy 生效性 + 排他/union/追加三语义工具的直连/MITM 双路径矩阵（R19，独立脚本 no-proxy-ca-test.sh；TLS-FAIL 红、OTHER-ERR/SKIP 不判红） |
 | `真实工具链 e2e` | 真实客户端工具（pip/apt/npm/uv/go/wget/git-lfs/modelscope/model+dataset/git）零镜像配置跑通；另复刻上游仓库 CI 现状：`download.pytorch.org` torch 索引、`hf download` + `HF_ENDPOINT=hf-mirror.com`；`heavy=1` 追加 torch wheel 全量下载 + rustup/conda/cmake/bazel/precommit |
 | `容器层·*（CANN 镜像）` | 功能/并发/vllm/工具链/miss-p95/镜像构建/no_proxy×CA 矩阵七组在 `cann:9.0.0-a3-ubuntu22.04-py3.12` 容器里各跑一遍（多验 CA 信任路径 + 镜像内 gitconfig 形态）；容器层 job 用 needs 链串行（container hook 并发挂死竞态，issue #2） |
+| `容器层·dnf/yum（openEuler 24.03）` | R20：`swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03` 里真实跑 `dnf makecache` + `dnf install tree` + `yum install jq`；首步 dnf 装 `git-core` 引导 checkout。这是套件里唯一覆盖 RHEL 系 CA 信任路径（anchors + `update-ca-trust`，不靠 CA env）的样本 |
 | `汇总` | 聚合全部 job 结果表到 GITHUB_STEP_SUMMARY |
 
 ## 四、看结果
