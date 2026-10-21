@@ -164,6 +164,13 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   2026-10-16 本机语义实证：curl 8.22 对 SSL_CERT_FILE 走排他加载（空文件
   error 77、无关证书 error 60，默认 CA 目录不兜底）；openssl s_client 走
   file∪dir union（坏 file 被 dir 兜底仍绿）；node 只追加。
+  2026-10-21 增：kubectl（Go net/http 的 ProxyFromEnvironment）单独验证
+  172.16.0.0/12——Go 与 curl 各有 no_proxy 解析器，CIDR 命中不能用 curl 代答。
+  手段：mock kubeconfig 指向 172.16.255.254:6443（伪 API server），把代理
+  换成"记账代理"（收到 CONNECT 即落盘回 502），公网 203.0.113.1 作正样本；
+  NO_PROXY 已含该网段却出现 CONNECT 即判红（内网请求会被 squid 接走）。
+  注意 kubeconfig 的 user 不能为空：空 user 会让 kubectl 先交互式要
+  Username，请求根本没发出（本机实证，必须给 token 占位）。
 - **R20 dnf/yum 只在原生基底验证**（2026-10-21 增补）：包管理器的源配置、
   metalink 解析、GPG 校验、RPM 事务都不能靠 curl 模拟——必须用 openEuler/
   RHEL 基底镜像真实跑。runner 与 CANN 镜像均 ubuntu，套件内 pkg 阶段按 R16

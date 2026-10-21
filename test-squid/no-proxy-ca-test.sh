@@ -323,6 +323,140 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 3.5 kubectl（Go 客户端）× 172.16.0.0/12 no_proxy 语义
+#     平台 NO_PROXY 含 172.16.0.0/12（集群内网段）。Go 的
+#     http.ProxyFromEnvironment 与 curl 各自实现 no_proxy 解析，CIDR 命中行为
+#     必须用 Go 客户端独立验证：mock kubeconfig 指向 172.16.0.0/12 内的伪 API
+#     server，用本地"记账代理"（收到 CONNECT 即落盘并回 502）代替 squid 观测：
+#       no_proxy 命中 → 客户端直连 → 记账代理零 CONNECT（squid 看不到该请求）
+#       未命中       → CONNECT 到达记账代理（真实环境即被 squid 接走）
+#     期望值按实际注入的 NO_PROXY 计算（各集群配置不同不误判）；公网地址
+#     203.0.113.1（TEST-NET-3）作正样本，证明观测方法本身有效。
+# ---------------------------------------------------------------------------
+KUBECTL=""
+command -v kubectl >/dev/null 2>&1 && KUBECTL="$(command -v kubectl)"
+if [ -z "$KUBECTL" ]; then
+    # 官方 release 下载（dl.k8s.io 不在 no_proxy → 经 squid；首次后由缓存加速）
+    KVER=$(curl -sS --max-time 30 https://dl.k8s.io/release/stable.txt 2>/dev/null)
+    case "$(uname -m)" in
+        aarch64|arm64) KARCH=arm64 ;;
+        *)             KARCH=amd64 ;;
+    esac
+    if [ -n "$KVER" ] && curl -sS --max-time 300 -o "$RESULTS_DIR/kubectl" \
+        "https://dl.k8s.io/release/$KVER/bin/linux/$KARCH/kubectl" 2>/dev/null; then
+        chmod +x "$RESULTS_DIR/kubectl"
+        "$RESULTS_DIR/kubectl" version --client >/dev/null 2>&1 && KUBECTL="$RESULTS_DIR/kubectl"
+    fi
+    [ -n "$KUBECTL" ] && log "bootstrap: kubectl $KVER（$KARCH）就绪"
+fi
+
+if [ -z "$KUBECTL" ]; then
+    skip kubectl-ctl proxy "kubectl 不可用且 bootstrap 失败"
+    skip kubectl-17216 npx "kubectl 不可用且 bootstrap 失败"
+elif ! command -v python3 >/dev/null 2>&1; then
+    skip kubectl-ctl proxy "python3 不可用（记账代理无法启动）"
+    skip kubectl-17216 npx "python3 不可用（记账代理无法启动）"
+else
+    log "―――――――――― kubectl（Go 客户端）× 172.16.0.0/12 no_proxy ――――――――――"
+    NP_ENV="${NO_PROXY:-${no_proxy:-}}"
+    KNP_DIR="$RESULTS_DIR/kubectl-npx"; mkdir -p "$KNP_DIR"
+    proxy_log="$KNP_DIR/proxy.log"; : > "$proxy_log"
+    proxy_port=$((19000 + RANDOM % 500))
+    python3 - "$proxy_port" "$proxy_log" <<'PYEOF' >/dev/null 2>&1 &
+import socket, sys, threading
+port, logf = int(sys.argv[1]), sys.argv[2]
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('127.0.0.1', port)); srv.listen(16); srv.settimeout(60)
+def handle(c):
+    try:
+        c.settimeout(5)
+        first = c.recv(4096).decode('latin-1', 'replace').split('\r\n')[0]
+        if first:
+            with open(logf, 'a') as f: f.write(first + '\n')
+        c.sendall(b'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n')
+    except OSError:
+        pass
+    finally:
+        c.close()
+while True:
+    try:
+        c, _ = srv.accept()
+    except socket.timeout:
+        break
+    threading.Thread(target=handle, args=(c,), daemon=True).start()
+PYEOF
+    proxy_pid=$!
+    sleep 1
+
+    mk_kubeconfig() { # mk_kubeconfig <文件> <server>
+        cat > "$1" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+- name: np
+  cluster:
+    server: $2
+    insecure-skip-tls-verify: true
+contexts:
+- name: np
+  context: {cluster: np, user: np}
+current-context: np
+users:
+- name: np
+  user:
+    token: mock   # 空 user 会触发 kubectl 交互式 "Please enter Username"
+EOF
+    }
+
+    fake_px="http://127.0.0.1:$proxy_port"
+    np_kubectl() { # np_kubectl <label> <server> → yes/no：记账代理是否收到 CONNECT
+        local label="$1" server="$2" before after
+        mk_kubeconfig "$KNP_DIR/$label.yaml" "$server"
+        before=$(wc -l < "$proxy_log")
+        timeout 25 env HTTP_PROXY="$fake_px" HTTPS_PROXY="$fake_px" \
+            NO_PROXY="$NP_ENV" no_proxy="$NP_ENV" \
+            "$KUBECTL" --kubeconfig "$KNP_DIR/$label.yaml" --request-timeout=8s \
+            get --raw /healthz > "$KNP_DIR/$label.out" 2>&1
+        sleep 1
+        after=$(wc -l < "$proxy_log")
+        [ "$after" -gt "$before" ] && echo yes || echo no
+    }
+
+    in_ctl=$(np_kubectl ctl-public https://203.0.113.1:6443)
+    in_tgt=$(np_kubectl tgt-17216 https://172.16.255.254:6443)
+    kill "$proxy_pid" 2>/dev/null; wait "$proxy_pid" 2>/dev/null
+
+    if [ "$in_ctl" = yes ]; then
+        printf 'kubectl-ctl\tproxy\t0\tOK\n' >> "$TSV"
+        log "### [kubectl-ctl/proxy] OK  不在 no_proxy 的公网地址确实发出 CONNECT（观测方法有效）"
+    else
+        printf 'kubectl-ctl\tproxy\t-\tSKIP\n' >> "$TSV"
+        log "### [kubectl-ctl/proxy] SKIP 记账代理未收到 CONNECT（kubectl 未读 proxy env？）——无法判定，记录不判红"
+    fi
+
+    KUBECTL_NPX_FAIL=0
+    case ",$NP_ENV," in
+        *,172.16.0.0/12,*)
+            if [ "$in_tgt" = no ]; then
+                printf 'kubectl-17216\tnpx\t0\tOK\n' >> "$TSV"
+                log "### [kubectl-17216/npx] OK  172.16.255.254 命中 no_proxy → 直连，记账代理零 CONNECT（squid 不会看到该请求）"
+            else
+                printf 'kubectl-17216\tnpx\t3\tNO_PROXY-MISS\n' >> "$TSV"
+                log "### [kubectl-17216/npx] ❌ NO_PROXY 已含 172.16.0.0/12，但 kubectl 仍发出 CONNECT → 该请求会被 squid 接走（Go 客户端 CIDR 语义未生效）"
+                KUBECTL_NPX_FAIL=1
+            fi ;;
+        *)
+            if [ "$in_tgt" = yes ]; then
+                printf 'kubectl-17216\tproxy\t0\tOK\n' >> "$TSV"
+                log "### [kubectl-17216/proxy] OK  NO_PROXY 未含 172.16.0.0/12 → CONNECT 到达代理（流量按配置走 squid）"
+            else
+                printf 'kubectl-17216\tproxy\t-\tSKIP\n' >> "$TSV"
+                log "### [kubectl-17216/proxy] SKIP NO_PROXY 未配置该网段但也没发 CONNECT——观测异常，记录不判红"
+            fi ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
 # 4. 汇总判定
 # ---------------------------------------------------------------------------
 log "―――――――――― 结果汇总（$TSV） ――――――――――"
@@ -344,6 +478,13 @@ if [ "$tls_fail" -gt 0 ]; then
     exit 1
 fi
 [ "$other_err" -gt 0 ] && log "⚠️ $other_err 个 OTHER-ERR（网络/协议层，记录不判红）"
+# kubectl 的 no_proxy 失效是明确缺陷（NO_PROXY 已声明该网段却仍进 squid），
+# 与 npx-hit 的数据留档口径不同：这一条直接判红。
+if [ "${KUBECTL_NPX_FAIL:-0}" -gt 0 ]; then
+    log "❌ kubectl 对 172.16.0.0/12 的 no_proxy 未生效：内网 API 请求会被 squid 接走"
+    log "   → 检查 NO_PROXY 大小写/写法（Go 需 CIDR 形式 172.16.0.0/12）、是否被 job env 覆盖"
+    exit 1
+fi
 if [ "$INJ_FORM" = "bundle" ]; then
     log "✅ bundle 形态（PR #2017）：直连（公共根）与 MITM（squid CA）双路径全绿——同一信任源自洽"
 else

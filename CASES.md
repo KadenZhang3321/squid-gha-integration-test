@@ -281,7 +281,7 @@ OBS 分支（规则 11 把 OBS 划入不重写范围），实际命中规则 12�
 
 | 阶段 | 场景 | 判定 | 规则 |
 |---|---|---|---|
-| `cabundle-matrix` | 独立脚本 `no-proxy-ca-test.sh`：① CA 文件数证书张数（1 张=纯 squid CA / ≥2 张=bundle）；② no_proxy 生效性（api.github.com 出网无 CONNECT 行）；③ 直连腿（curl/s_client/requests/node，公共 CA 证书）+ 经 squid 腿（curl/git/requests/pip，MITM 重签） | 任一 TLS-FAIL → FAIL（直连红=排他变量挤掉公共根，squid-ca.pem 需换 bundle；代理红=MITM 信任断裂）；OTHER-ERR（网络/协议层）与 SKIP（工具缺失，如镜像无 node）记录不判红 | R19 |
+| `cabundle-matrix` | 独立脚本 `no-proxy-ca-test.sh`：① CA 文件数证书张数（1 张=纯 squid CA / ≥2 张=bundle）；② no_proxy 生效性（api.github.com 出网无 CONNECT 行）；③ 直连腿（curl/s_client/requests/node，公共 CA 证书）+ 经 squid 腿（curl/git/requests/pip，MITM 重签）；④ **kubectl（Go 客户端）× 172.16.0.0/12**：mock kubeconfig 指向该网段内伪 API server，本地"记账代理"观测是否发 CONNECT（公网地址作正样本） | 任一 TLS-FAIL → FAIL（直连红=排他变量挤掉公共根，squid-ca.pem 需换 bundle；代理红=MITM 信任断裂）；NO_PROXY 已声明 172.16.0.0/12 但 kubectl 仍发 CONNECT → FAIL（内网请求会被 squid 接走）；OTHER-ERR（网络/协议层）与 SKIP（工具缺失，如镜像无 node）记录不判红 | R19 |
 
 本地冒烟：`CA=/etc/ssl/certs/ca-certificates.crt bash test-squid/no-proxy-ca-test.sh`
 （本机无 squid-ca.pem，用系统 bundle 验脚本逻辑；无代理 env 时 proxy 腿 SKIP）。
