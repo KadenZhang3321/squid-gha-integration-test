@@ -171,6 +171,11 @@ squid 不是黑盒。每个 case 必须声明自己打哪个功能面：
   NO_PROXY 已含该网段却出现 CONNECT 即判红（内网请求会被 squid 接走）。
   注意 kubeconfig 的 user 不能为空：空 user 会让 kubectl 先交互式要
   Username，请求根本没发出（本机实证，必须给 token 占位）。
+  kubectl 二进制获取走镜像链：gy-006 上 dl.k8s.io（fastly）出口不通，裸二进制
+  拉不动——改从 USTC/NJU 镜像的 pkgs.k8s.io deb 仓库取 `kubectl_<ver>_<arch>.deb`
+  （11MB，`dpkg-deb -x` 或 `ar`+`tar` 解出 `/usr/bin/kubectl`），裸二进制源
+  （dl.k8s.io / DaoCloud 反代）作兜底；两跳都有逐源日志，CI 日志可直接回答
+  "本集群哪个源可用"。
 - **R20 dnf/yum 只在原生基底验证**（2026-10-21 增补）：包管理器的源配置、
   metalink 解析、GPG 校验、RPM 事务都不能靠 curl 模拟——必须用 openEuler/
   RHEL 基底镜像真实跑。runner 与 CANN 镜像均 ubuntu，套件内 pkg 阶段按 R16

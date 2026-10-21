@@ -336,18 +336,61 @@ fi
 KUBECTL=""
 command -v kubectl >/dev/null 2>&1 && KUBECTL="$(command -v kubectl)"
 if [ -z "$KUBECTL" ]; then
-    # 官方 release 下载（dl.k8s.io 不在 no_proxy → 经 squid；首次后由缓存加速）
-    KVER=$(curl -sS --max-time 30 https://dl.k8s.io/release/stable.txt 2>/dev/null)
+    # 镜像源下载（二进制落 /tmp，不进 artifacts）。背景：gy-006 上 dl.k8s.io 拉不动
+    # （fastly 出口不通，cabundle artifact 里没有 kubectl、两行全 SKIP）。
+    # 策略：先走国内镜像的 deb 包——pkgs.k8s.io 的结构被 USTC/NJU 完整镜像，
+    # kubectl_<ver>_<arch>.deb 仅 11MB（裸二进制 61MB），解包即得 /usr/bin/kubectl；
+    # 失败再退回裸二进制源（官方 dl.k8s.io / DaoCloud 反代）。
+    # 可用 KUBECTL_DEB_MIRRORS / KUBECTL_BIN_MIRRORS 覆盖（空格分隔 base）。
     case "$(uname -m)" in
         aarch64|arm64) KARCH=arm64 ;;
         *)             KARCH=amd64 ;;
     esac
-    if [ -n "$KVER" ] && curl -sS --max-time 300 -o "$RESULTS_DIR/kubectl" \
-        "https://dl.k8s.io/release/$KVER/bin/linux/$KARCH/kubectl" 2>/dev/null; then
-        chmod +x "$RESULTS_DIR/kubectl"
-        "$RESULTS_DIR/kubectl" version --client >/dev/null 2>&1 && KUBECTL="$RESULTS_DIR/kubectl"
+    KNP_BIN_DIR="$(mktemp -d /tmp/kubectl-np.XXXXXX)"
+
+    # (a) deb 包源
+    for base in ${KUBECTL_DEB_MIRRORS:-https://mirrors.ustc.edu.cn/kubernetes/core%3A/stable%3A/v1.33/deb https://mirrors.nju.edu.cn/kubernetes/core%3A/stable%3A/v1.33/deb https://pkgs.k8s.io/core:/stable:/v1.33/deb}; do
+        base="${base%/}"
+        pkg=$(curl -fsSL --max-time 60 "$base/Packages" 2>/dev/null | awk -v a="$KARCH" '
+            /^Package: /{p=$2} /^Architecture: /{ar=$2}
+            /^Filename: /{if (p=="kubectl" && ar==a) {print $2; exit}}')
+        if [ -z "$pkg" ]; then
+            log "bootstrap: $base 无 kubectl/$KARCH 条目，试下一源"
+            continue
+        fi
+        if curl -fsSL --max-time 300 -o "$KNP_BIN_DIR/kubectl.deb" "$base/$pkg" 2>/dev/null \
+           && { dpkg-deb -x "$KNP_BIN_DIR/kubectl.deb" "$KNP_BIN_DIR/x" 2>/dev/null \
+                || { mkdir -p "$KNP_BIN_DIR/x" \
+                     && (cd "$KNP_BIN_DIR/x" && ar x ../kubectl.deb && tar -xf data.tar.*); }; } \
+           && [ -x "$KNP_BIN_DIR/x/usr/bin/kubectl" ] \
+           && "$KNP_BIN_DIR/x/usr/bin/kubectl" version --client >/dev/null 2>&1; then
+            KUBECTL="$KNP_BIN_DIR/x/usr/bin/kubectl"
+            log "bootstrap: kubectl（deb $pkg）← $base"
+            break
+        fi
+        rm -rf "$KNP_BIN_DIR/x" "$KNP_BIN_DIR/kubectl.deb"
+        log "bootstrap: $base 不可用，试下一源"
+    done
+
+    # (b) 裸二进制源（deb 全败时兜底）
+    if [ -z "$KUBECTL" ]; then
+        for base in ${KUBECTL_BIN_MIRRORS:-https://dl.k8s.io https://files.m.daocloud.io/dl.k8s.io}; do
+            base="${base%/}"
+            ver="${KUBECTL_VERSION:-}"
+            [ -z "$ver" ] && ver=$(curl -sSL --max-time 20 "$base/release/stable.txt" 2>/dev/null | tr -d '\r\n')
+            [ -z "$ver" ] && ver="v1.33.0"   # stable.txt 取不到时钉版本兜底
+            if curl -fsSL --max-time 300 -o "$KNP_BIN_DIR/kubectl" \
+                   "$base/release/$ver/bin/linux/$KARCH/kubectl" 2>/dev/null \
+               && chmod +x "$KNP_BIN_DIR/kubectl" \
+               && "$KNP_BIN_DIR/kubectl" version --client >/dev/null 2>&1; then
+                KUBECTL="$KNP_BIN_DIR/kubectl"
+                log "bootstrap: kubectl $ver（$KARCH）← $base"
+                break
+            fi
+            rm -f "$KNP_BIN_DIR/kubectl"
+            log "bootstrap: $base 不可用，试下一源"
+        done
     fi
-    [ -n "$KUBECTL" ] && log "bootstrap: kubectl $KVER（$KARCH）就绪"
 fi
 
 if [ -z "$KUBECTL" ]; then
