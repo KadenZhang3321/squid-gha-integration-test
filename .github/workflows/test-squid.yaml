@@ -16,7 +16,8 @@
 #   imagebuild  —— 镜像构建网络模拟（vllm-ascend Dockerfile.310p 外网面：
 #                  catlass 子模块 + cmake 第三方压缩包 + GIT_PROXY clone vllm）
 #   cabundle    —— no_proxy 直连 × CA 注入矩阵（排他/union/追加三语义工具，
-#                  CA 形态取证 + no_proxy 生效性 + 直连/MITM 双路径）
+#                  CA 形态取证 + no_proxy 生效性 + 直连/MITM 双路径 +
+#                  新增直连域（云元数据/LLM 统计/API，PR #2194）绕行验证）
 #   miss-p95    —— SquidMissP95Slow 告警假慢复现（broker 长轮询 hold 顶爆
 #                  MISS p95 的口径缺陷，test-squid/repro-miss-p95.sh）
 #   tools       —— 真实工具链 e2e（no-mirror-test tool-* 移植：零镜像配置，
@@ -44,6 +45,10 @@ on:
         default: '0'
       bundle_fix:
         description: '1=cabundle 矩阵把 CA 变量重指向系统 bundle（验证根修形态，postStart 预演）'
+        required: false
+        default: '0'
+      np_strict:
+        description: '1=新增直连域（云元数据/LLM 统计/API）必须全部命中 NO_PROXY（gy-006 cpu-2 配置验证用）'
         required: false
         default: '0'
   pull_request:
@@ -313,7 +318,8 @@ jobs:
     # 库级 union（SSL_CERT_FILE）、追加（NODE_EXTRA_CA_CERTS）。风险：no_proxy
     # 命中 → 直连 → 对端是公共 CA 证书，排他变量若指向纯 squid CA（无公共根）
     # 则直连断裂。本组取证 CA 文件形态（纯 CA vs bundle）+ no_proxy 生效性 +
-    # 工具×路径矩阵（test-squid/no-proxy-ca-test.sh）
+    # 工具×路径矩阵 + 新增直连域（PR #2194 首批）是否绕开 squid
+    # （test-squid/no-proxy-ca-test.sh）
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     steps:
       - uses: actions/checkout@v7
@@ -321,6 +327,10 @@ jobs:
       - name: 运行 no_proxy × CA 矩阵
         env:
           BUNDLE_FIX: ${{ github.event_name == 'pull_request' && '0' || inputs.bundle_fix }}
+          # 新增直连域（PR #2194 首批）只在 gy-006 linux-amd64-cpu-2 模板落地。
+          # 默认宽松：未纳入本批的 runner set 记录 SKIP 不判红（分批推进）；
+          # 手动 np_strict=1 时要求 6 个域全部命中 NO_PROXY（配置落地验证）。
+          NP_DOMAIN_STRICT: ${{ github.event_name == 'pull_request' && '0' || inputs.np_strict }}
         run: bash test-squid/run-suite.sh --mode cabundle
 
       - name: 上传结果

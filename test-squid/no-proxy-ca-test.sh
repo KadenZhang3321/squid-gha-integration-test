@@ -32,20 +32,29 @@
 #         新形态新增风险：bundle 文件由 postStart 生成——未挂 emptyDir /
 #         postStart 未跑 / 合成自检失败时文件缺失或坏 PEM → 所有 TLS 腿断。
 #
-# 本测试做四件事：
+# 本测试做五件事：
 #   1. CA 文件形态取证：纯 squid CA（1 张）还是 bundle（squid CA+公共根）
 #   2. 注入接线判定：pod env 实际指向 legacy 还是 bundle 形态（PR #2017）
 #   3. no_proxy 生效性：api.github.com 是否真的绕开 squid（无 CONNECT 行）
 #   4. 工具 × 路径矩阵：直连（公共证书）/ 经 squid（MITM 重签）；两种形态下
 #      TLS-FAIL 都判红——legacy 红 = 暴露已知缺陷，bundle 红 = 接线/合成真故障
+#   5. 新增直连域生效性（PR ascend-ci-deployment#2194 首批）：云元数据端点
+#      （100.100.100.200 / 169.254.169.254 / metadata.google.internal）与不可缓存
+#      的 LLM 统计/API 域（stats.vllm.ai / api.siliconflow.cn / api.deepseek.com）
+#      是否真的绕开 squid——按 runner set 是否已纳入本批自适应判定（见 3.6 节）
 #
 # 用法：
 #   bash test-squid/no-proxy-ca-test.sh                  # runner 上跑（pod env 已注入）
 #   CA=/etc/ssl/certs/ca-certificates.crt bash ...       # 本地冒烟（指定任意 bundle）
 #   SQUID_PROXY=http://1.2.3.4:3128 bash ...             # 本地显式指定 squid
+#   NP_DOMAIN_STRICT=1 bash ...                          # 新增直连域必须全部命中
+#                                                        # NO_PROXY（分批推进期默认 0）
+#   NP_DOMAIN_ENDPOINTS=... bash ...                     # 覆盖新增直连域清单
+#                                                        # （逗号分隔的完整 URL）
 #
 # 判定：任一 TLS-FAIL → 退出 1（直连断裂=注入形态缺陷 / MITM 断裂=信任问题）；
-#       OTHER-ERR（网络/协议层）记录不判红；SKIP（工具缺失/无代理 env）不影响。
+#       NO_PROXY 已声明的新增直连域仍走代理 → 退出 1（不可缓存域被 squid 接走）；
+#       OTHER-ERR（网络/协议层）记录不判红；SKIP（工具缺失/无代理 env/分批未覆盖）不影响。
 #
 # 输出：终端表 + ${RESULTS_DIR:-/tmp/test-squid-results}/no-proxy-ca.tsv
 # =============================================================================
@@ -500,6 +509,82 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# 3.6 新增直连域生效性（PR opensourceways/ascend-ci-deployment#2194 首批）
+#     云元数据端点（100.100.100.200 / 169.254.169.254 / metadata.google.internal）
+#     与不可缓存的 LLM 统计/API 域（stats.vllm.ai / api.siliconflow.cn /
+#     api.deepseek.com）已写入 gy-006 linux-amd64-cpu-2 的 pod 模板 NO_PROXY。
+#     本组只验一个契约：这些域是否真的绕开 squid（curl 不再读代理变量）。
+#
+#     判定按"该 runner set 是否已纳入本批"自适应（PR 分批推进，未覆盖 ≠ 故障）：
+#       NO_PROXY 已含该域 + 仍走代理 → NO_PROXY-MISS，判红（写法/覆盖缺陷）
+#       NO_PROXY 已含该域 + 直连     → OK
+#       NO_PROXY 未含该域            → SKIP（NP_DOMAIN_STRICT=1 时改为判红）
+#
+#     观测方法：curl -v 决定走代理时打印 "Uses proxy env variable HTTPS_PROXY"，
+#     NO_PROXY 命中则不出该行。不需要真实出网（DNS 失败/超时都不影响判定），
+#     因此对 link-local 元数据地址与境外 API 域同样可用。
+# ---------------------------------------------------------------------------
+NP_DOMAIN_ENDPOINTS="${NP_DOMAIN_ENDPOINTS:-http://100.100.100.200,http://169.254.169.254,http://metadata.google.internal,https://stats.vllm.ai,https://api.siliconflow.cn,https://api.deepseek.com}"
+NP_DOMAIN_STRICT="${NP_DOMAIN_STRICT:-0}"
+NP_DOMAIN_FAIL=0
+
+# use_px <curl verbose 输出> → 0 表示 curl 决定走代理
+use_px() { grep -qE 'Uses proxy env variable (HTTPS?_PROXY|ALL_PROXY|https?_proxy|all_proxy)' <<<"$1"; }
+
+# np_has_domain <host> → 0 表示该主机被 NO_PROXY 覆盖（大小写两份取并集，
+# 与 curl 的实际读取行为一致）
+np_has_domain() {
+    local host list
+    host=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    for list in "${NO_PROXY:-}" "${no_proxy:-}"; do
+        list=$(printf '%s' "$list" | tr -d '[:space:]' | tr 'A-Z' 'a-z')
+        case ",$list," in
+            *,\*,*|*,"$host",*|*,".$host",*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+if [ -z "$HAS_PX" ]; then
+    skip np-domain-all npx "本环境无 http(s)_proxy 注入，无法判定是否绕开代理"
+elif ! command -v curl >/dev/null 2>&1; then
+    skip np-domain-all npx "curl 不可用"
+else
+    log "―――――――――― 新增直连域生效性（PR #2194 首批） ――――――――――"
+    # 对照组：不在 NO_PROXY 的 github.com 必须走代理，否则本组观测不可信
+    ctl_out=$(curl -sv --max-time 8 https://github.com -o /dev/null 2>&1)
+    if use_px "$ctl_out"; then
+        printf 'np-domain-ctl\tproxy\t0\tOK\n' >> "$TSV"
+        log "### [np-domain-ctl/proxy] OK  对照域 github.com 仍走代理（观测方法有效）"
+    else
+        printf 'np-domain-ctl\tproxy\t-\tSKIP\n' >> "$TSV"
+        log "### [np-domain-ctl/proxy] SKIP 对照域也未走代理（NO_PROXY 全通配或 curl 未读代理 env）——本组观测不可信，不判红"
+    fi
+
+    for ep in ${NP_DOMAIN_ENDPOINTS//,/ }; do
+        host=${ep#*://}; host=${host%%/*}
+        if np_has_domain "$host"; then
+            out=$(curl -sv --max-time 8 "$ep" -o /dev/null 2>&1)
+            if use_px "$out"; then
+                printf 'np-domain-%s\tnpx\t3\tNO_PROXY-MISS\n' "$host" >> "$TSV"
+                log "### [np-domain-$host/npx] ❌ NO_PROXY 已含该域但仍走代理 → 该流量会被 squid 接走（不可缓存域被缓存/计费）"
+                NP_DOMAIN_FAIL=$((NP_DOMAIN_FAIL + 1))
+            else
+                printf 'np-domain-%s\tnpx\t0\tOK\n' "$host" >> "$TSV"
+                log "### [np-domain-$host/npx] OK  命中 NO_PROXY → curl 直连（未读代理变量）"
+            fi
+        elif [ "$NP_DOMAIN_STRICT" = "1" ]; then
+            printf 'np-domain-%s\tnpx\t3\tNO_PROXY-MISS\n' "$host" >> "$TSV"
+            log "### [np-domain-$host/npx] ❌ NO_PROXY 未含该域（NP_DOMAIN_STRICT=1 要求本 runner set 纳入）"
+            NP_DOMAIN_FAIL=$((NP_DOMAIN_FAIL + 1))
+        else
+            printf 'np-domain-%s\tnpx\t-\tSKIP\n' "$host" >> "$TSV"
+            log "### [np-domain-$host/npx] SKIP  该 runner set 的 NO_PROXY 未含此域（PR #2194 分批推进，仅覆盖 gy-006 cm 模板）"
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
 # 4. 汇总判定
 # ---------------------------------------------------------------------------
 log "―――――――――― 结果汇总（$TSV） ――――――――――"
@@ -526,6 +611,13 @@ fi
 if [ "${KUBECTL_NPX_FAIL:-0}" -gt 0 ]; then
     log "❌ kubectl 对 172.16.0.0/12 的 no_proxy 未生效：内网 API 请求会被 squid 接走"
     log "   → 检查 NO_PROXY 大小写/写法（Go 需 CIDR 形式 172.16.0.0/12）、是否被 job env 覆盖"
+    exit 1
+fi
+# 新增直连域：NO_PROXY 已声明却仍走代理 = 配置未生效（不可缓存流量被 squid 接走）。
+if [ "${NP_DOMAIN_FAIL:-0}" -gt 0 ]; then
+    log "❌ 新增直连域有 $NP_DOMAIN_FAIL 个未绕开代理："
+    awk -F'\t' 'NR>1 && $1 ~ /^np-domain-/ && $1 != "np-domain-ctl" && $4=="NO_PROXY-MISS" {print "    - " $1}' "$TSV"
+    log "   → 检查 NO_PROXY 实际 env（大小写两域名都要）、ConfigMap 是否已 rollout 到运行中的 pod"
     exit 1
 fi
 if [ "$INJ_FORM" = "bundle" ]; then

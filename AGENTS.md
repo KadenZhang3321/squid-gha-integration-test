@@ -28,6 +28,7 @@ gh workflow run test-squid.yaml --repo ascend-gha-runners/squid-gha-integration-
 | `runner` | `["linux-amd64-cpu-2", "gy-006"]` | runner 标签，**JSON 数组字符串**。数组内多标签是 AND 关系（必须全命中）。⚠️ 不要写成逗号字符串——表达式里的逗号串不会拆成多标签，job 会永久 queued |
 | `ladder` | `1 4 8 16` | 同对象并发的阶梯并发度 |
 | `heavy` | `0` | `1` = 启用 ~146MB 大载荷场景（耗时长，日常不用开） |
+| `np_strict` | `0` | `1` = 新增直连域（云元数据端点 + LLM 统计/API 域）必须全部命中 NO_PROXY，用于 gy-006 cpu-2 配置落地验证；默认宽松（未纳入本批的 runner set 记 SKIP） |
 
 也可在 GitHub 网页端触发：仓库 → **Actions** → **test-squid** → **Run workflow**。
 
@@ -88,7 +89,7 @@ gh workflow run test-squid.yaml --repo ascend-gha-runners/squid-gha-integration-
 | `透明重写同构校验` | no-mirror tool-17 全量移植：13 条重写规则内容签名 + 负样本 + 回归守卫（runner 层 only） |
 | `上游通道健康` | gh-proxy 延迟预算（p50≤5s，A/B 对照）+ read_timeout 数据留档（R17，runner 层 only；Actions 构件通道已入 NO_PROXY 直连，不测不过 squid 的流量） |
 | `镜像构建网络模拟` | vllm-ascend Dockerfile.310p 外网面复刻（R18）：catlass 子模块（gitcode.com pinned commit）+ cmake 第三方压缩包（cann-src-third-party ×5 两遍拉取 sha256 比对）+ GIT_PROXY insteadOf clone vllm（大 pack 吞吐）+ OBS 静态资产（CANN `.run` Range/HEAD 带 Referer、CI 覆盖率 JSON/tar.gz 魔数、gitleaks ELF 执行、负样本 404） |
-| `no_proxy × CA 注入矩阵` | CA 形态取证（纯 squid CA vs bundle）+ no_proxy 生效性 + 排他/union/追加三语义工具的直连/MITM 双路径矩阵（R19，独立脚本 no-proxy-ca-test.sh；TLS-FAIL 红、OTHER-ERR/SKIP 不判红） |
+| `no_proxy × CA 注入矩阵` | CA 形态取证（纯 squid CA vs bundle）+ no_proxy 生效性 + 排他/union/追加三语义工具的直连/MITM 双路径矩阵 + 新增直连域（云元数据端点、LLM 统计/API 域，PR #2194）是否真的绕开 squid（R19，独立脚本 no-proxy-ca-test.sh；TLS-FAIL 红、NO_PROXY-MISS 红、OTHER-ERR/SKIP 不判红） |
 | `真实工具链 e2e` | 真实客户端工具（pip/apt/npm/uv/go/wget/git-lfs/modelscope/model+dataset/git）零镜像配置跑通；另复刻上游仓库 CI 现状：`download.pytorch.org` torch 索引、`hf download` + `HF_ENDPOINT=hf-mirror.com`；`heavy=1` 追加 torch wheel 全量下载 + rustup/conda/cmake/bazel/precommit |
 | `容器层·*（CANN 镜像）` | 功能/并发/vllm/工具链/miss-p95/镜像构建/no_proxy×CA 矩阵七组在 `cann:9.0.0-a3-ubuntu22.04-py3.12` 容器里各跑一遍（多验 CA 信任路径 + 镜像内 gitconfig 形态）；容器层 job 用 needs 链串行（container hook 并发挂死竞态，issue #2） |
 | `容器层·dnf/yum（openEuler 24.03）` | R20：`swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03` 里真实跑 `dnf makecache` + `dnf install tree` + `yum install jq`；首步 dnf 装 `git-core` 引导 checkout。这是套件里唯一覆盖 RHEL 系 CA 信任路径（anchors + `update-ca-trust`，不靠 CA env）的样本 |
