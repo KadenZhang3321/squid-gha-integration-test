@@ -523,6 +523,9 @@ fi
 #     观测方法：curl -v 决定走代理时打印 "Uses proxy env variable HTTPS_PROXY"，
 #     NO_PROXY 命中则不出该行。不需要真实出网（DNS 失败/超时都不影响判定），
 #     因此对 link-local 元数据地址与境外 API 域同样可用。
+#
+#     另查格式卫生：条目带前/后空白时 curl/Go/Python 会自行 strip 掩盖问题，
+#     而 wget（实测 1.25）不 strip → NO_PROXY 必须本身就是干净的逗号清单。
 # ---------------------------------------------------------------------------
 NP_DOMAIN_ENDPOINTS="${NP_DOMAIN_ENDPOINTS:-http://100.100.100.200,http://169.254.169.254,http://metadata.google.internal,https://stats.vllm.ai,https://api.siliconflow.cn,https://api.deepseek.com}"
 NP_DOMAIN_STRICT="${NP_DOMAIN_STRICT:-0}"
@@ -551,6 +554,25 @@ elif ! command -v curl >/dev/null 2>&1; then
     skip np-domain-all npx "curl 不可用"
 else
     log "―――――――――― 新增直连域生效性（PR #2194 首批） ――――――――――"
+    # 格式卫生：条目带前后空白（YAML `>-` 折行会生成 ", .svc..."）时，curl/Go/
+    # Python 会自行 strip 而掩盖问题，但 wget 实测不 strip（会失去旁路）→ 单独留档，
+    # 严格模式判红，避免"只有会 strip 的客户端才通过"的假绿。
+    padded=$(printf '%s\n%s' "${NO_PROXY:-}" "${no_proxy:-}" | tr ',' '\n' \
+             | grep -vE '^[[:space:]]*$' | grep -nE '^[[:space:]]+|[[:space:]]+$' | head -3)
+    if [ -n "$padded" ]; then
+        msg=$(printf '%s' "$padded" | tr '\n' ';' | cut -c1-120)
+        if [ "$NP_DOMAIN_STRICT" = "1" ]; then
+            printf 'np-domain-fmt\tnpx\t3\tNO_PROXY-PADDED\n' >> "$TSV"
+            log "### [np-domain-fmt/npx] ❌ NO_PROXY 存在空白填充条目（wget 等不 strip 的客户端会失去旁路）：$msg"
+            NP_DOMAIN_FAIL=$((NP_DOMAIN_FAIL + 1))
+        else
+            printf 'np-domain-fmt\tnpx\t0\tWARN\n' >> "$TSV"
+            log "### [np-domain-fmt/npx] ⚠️ NO_PROXY 存在空白填充条目（wget 等不 strip 的客户端会失去旁路）：$msg"
+        fi
+    else
+        printf 'np-domain-fmt\tnpx\t0\tOK\n' >> "$TSV"
+        log "### [np-domain-fmt/npx] OK  NO_PROXY 无空白填充条目（不依赖客户端自行 strip）"
+    fi
     # 对照组：不在 NO_PROXY 的 github.com 必须走代理，否则本组观测不可信
     ctl_out=$(curl -sv --max-time 8 https://github.com -o /dev/null 2>&1)
     if use_px "$ctl_out"; then
