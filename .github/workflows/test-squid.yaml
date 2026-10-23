@@ -71,6 +71,14 @@ on:
         description: 'LFS 验证用的 gitcode 仓库 URL（空=用 GITCODE_REPO，无 filter=lfs 则 SKIP）'
         required: false
         default: ''
+      container_image:
+        description: 'CANN 容器层镜像（跨集群拉取慢时换成就近仓库，如 quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12）'
+        required: false
+        default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12'
+      openeuler_image:
+        description: 'dnf/yum 容器层镜像（跨集群拉取慢时换成就近仓库，如 quay.io/openeuler/openeuler:24.03）'
+        required: false
+        default: 'swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03'
   pull_request:
     paths:
       - 'test-squid/**'
@@ -144,7 +152,7 @@ jobs:
     # container: 形态 —— 验证 squid 注入在用户镜像内同样生效（env 传递 + CA 灌库）
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+      image: ${{ inputs.container_image || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12' }}
     steps:
       # CANN 镜像 insteadOf 重写 github.com → gh-proxy 是环境正道，gitconfig 保留。
       # 仓库已转 public：gh-proxy 匿名可拉，无需额外凭据（此前 401 系私有仓库所致）
@@ -182,7 +190,7 @@ jobs:
     needs: [concurrency, container-function]
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+      image: ${{ inputs.container_image || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -222,7 +230,7 @@ jobs:
     needs: [vllm, container-concurrency]
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+      image: ${{ inputs.container_image || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -278,7 +286,7 @@ jobs:
     needs: [tools, container-vllm]
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+      image: ${{ inputs.container_image || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -385,7 +393,7 @@ jobs:
     if: always() && github.event_name == 'workflow_dispatch' && inputs.gitcode == '1'
     runs-on: ${{ fromJSON(inputs.runner) }}
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+      image: ${{ inputs.container_image || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -442,7 +450,7 @@ jobs:
     # 但多验一层执行形态与套件其余组保持两层对称）
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+      image: ${{ inputs.container_image || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -467,7 +475,7 @@ jobs:
     # 与脚本 -c 同值叠加，验证镜像内 gitconfig 形态下三路外网流量全通 + CA 信任路径
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+      image: ${{ inputs.container_image || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -489,7 +497,7 @@ jobs:
     # 镜像内工具链（python/pip/git）的排他语义表现
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
-      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+      image: ${{ inputs.container_image || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -517,7 +525,7 @@ jobs:
     # 容器层 job 仍须串行（issue #2 挂死竞态），挂在本链末尾。
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03
+      image: ${{ inputs.openeuler_image || 'swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03' }}
     steps:
       - name: 引导 git（dnf 真实安装；镜像默认 repo 含 debuginfo/source，仅开 OS）
         run: dnf -y --disablerepo='*' --enablerepo=OS install git-core
