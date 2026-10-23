@@ -132,7 +132,11 @@ jobs:
 
   container-function:
     name: 容器层·功能测试（CANN 镜像）
-    needs: function
+    # gitcode（opt-in 定向验证）排容器链最前，先出结论；它跳过时（非
+    # workflow_dispatch 或 gitcode!=1）本 job 照常跑，所以不能靠默认的
+    # "needs 全绿"语义，改为显式判定：function 必须成功，gitcode 只要没被取消。
+    needs: [function, gitcode]
+    if: ${{ !cancelled() && needs.function.result == 'success' && needs.gitcode.result != 'cancelled' }}
     # container: 形态 —— 验证 squid 注入在用户镜像内同样生效（env 传递 + CA 灌库）
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
@@ -359,7 +363,9 @@ jobs:
 
   gitcode:
     name: gitcode × smart git proxy 缓存（opt-in，容器层）
-    needs: [container-pkg]
+    # 排容器链最前（紧跟 runner 层 function），先出定向结论；其余容器 job 通过
+    # container-function 的 needs 串在它后面，仍然只有一个 container 作业在跑。
+    needs: [function]
     # 定向验证（R21）：pod postStart 追加
     #   url.<smart-git-proxy>/gitcode.com/.insteadOf = https://gitcode.com/
     # 后，gitcode.com 的 git 拉取是否真的走 smart git proxy、重复拉取是否命中
@@ -370,8 +376,8 @@ jobs:
     # postStart 写入 /root/.gitconfig，只对 `container:` 作业容器生效；
     # runner 容器走的是 AutoscalingRunnerSet values.yaml 的 env/postStart，
     # 没有这条重写（gy-005 cpu-8 实测），runner 层跑必判"未重写"。
-    # 挂在容器链末尾串行（issue #2 挂死竞态）；always() 保证前面环节失败
-    # 时这条定向验证仍能给出结论。
+    # 排容器链最前串行（issue #2 挂死竞态：容器作业必须一个接一个）；
+    # always() 保证 function 失败时这条定向验证仍能给出结论。
     if: always() && github.event_name == 'workflow_dispatch' && inputs.gitcode == '1'
     runs-on: ${{ fromJSON(inputs.runner) }}
     container:
