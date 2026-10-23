@@ -366,7 +366,7 @@ jobs:
           if-no-files-found: warn
 
   gitcode:
-    name: gitcode × smart git proxy 缓存（opt-in，容器层）
+    name: gitcode × 缓存后端（opt-in，容器层）
     # 排容器链最前（紧跟 runner 层 function），先出定向结论；其余容器 job 通过
     # container-function 的 needs 串在它后面，仍然只有一个 container 作业在跑。
     needs: [function]

@@ -12,6 +12,7 @@
 # 用法：
 #   ./test-squid/test-production-runners.sh                    # 全部生产 runner 顺序测
 #   ./test-squid/test-production-runners.sh --only cpu-2-hk001 # 只测指定标签
+#   ./test-squid/test-production-runners.sh --exclude aiframe   # 排除匹配的标签（逗号分隔）
 #   ./test-squid/test-production-runners.sh --list             # 只列标签不触发
 #   ./test-squid/test-production-runners.sh --no-watch         # 只触发不等结果
 #   ./test-squid/test-production-runners.sh --heavy 1          # 透传给 workflow
@@ -42,10 +43,14 @@ RUNNERS=(
     "linux-amd64-cpu-4-cn12-001|cn12-001|已注入（workflow pod 实测 env/CA 卷齐全）"
 )
 
-ONLY=""; NO_WATCH=0; LIST_ONLY=0; HEAVY=""; LADDER=""
+ONLY=""; EXCLUDE=""; NO_WATCH=0; LIST_ONLY=0; HEAVY=""; LADDER=""
+GITCODE=""; GITCODE_BACKEND=""; GITCODE_LFS_REPO=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --only)     ONLY="${2:?}"; shift 2 ;;
+        --exclude)  EXCLUDE="${2:?}"; shift 2 ;;
+        --gitcode)  GITCODE=1; GITCODE_BACKEND="${2:-smart-git-proxy}"; shift 2 ;;
+        --gitcode-lfs-repo) GITCODE_LFS_REPO="${2:?}"; shift 2 ;;
         --no-watch) NO_WATCH=1; shift ;;
         --list)     LIST_ONLY=1; shift ;;
         --heavy)    HEAVY="${2:?}"; shift 2 ;;
@@ -76,6 +81,10 @@ trigger_one() {  # trigger_one <标签> → stdout: run_id
     local extra=()
     [ -n "$HEAVY" ]  && extra+=(-f heavy="$HEAVY")
     [ -n "$LADDER" ] && extra+=(-f ladder="$LADDER")
+    if [ "$GITCODE" = 1 ]; then
+        extra+=(-f gitcode=1 -f gitcode_backend="$GITCODE_BACKEND" -f gitcode_direct=0)
+        [ -n "$GITCODE_LFS_REPO" ] && extra+=(-f gitcode_lfs_repo="$GITCODE_LFS_REPO")
+    fi
     [ -n "${BUNDLE_FIX:-}" ] && extra+=(-f bundle_fix="$BUNDLE_FIX")
     if ! gh workflow run "$WF" --repo "$REPO" --ref main \
             -f runner="[\"$label\"]" ${extra+"${extra[@]}"}; then
@@ -126,10 +135,20 @@ FAIL_TRIGGER=0
 for entry in "${RUNNERS[@]}"; do
     label="${entry%%|*}"
     [ -n "$ONLY" ] && [ "$label" != "$ONLY" ] && continue
+    # --exclude：逗号分隔，按标签子串排除（如 aiframe 排除 aarch64 测试集群，
+    # 该集群 Actions 侧容量死锁，见 AGENTS.md 注册表备注）
+    if [ -n "$EXCLUDE" ]; then
+        skip=0
+        IFS=',' read -ra _ex <<< "$EXCLUDE"
+        for e in "${_ex[@]}"; do
+            [ -n "$e" ] && [[ "$label" == *"$e"* ]] && skip=1
+        done
+        [ "$skip" = 1 ] && continue
+    fi
     LABELS+=("$label")
 done
 
-[ ${#LABELS[@]} -eq 0 ] && { echo "没有匹配的 runner（--only $ONLY）"; exit 2; }
+[ ${#LABELS[@]} -eq 0 ] && { echo "没有匹配的 runner（--only $ONLY --exclude $EXCLUDE）"; exit 2; }
 
 # 阶段 1：全部触发
 echo "== 阶段 1：触发 ${#LABELS[@]} 个 run =="
