@@ -1677,9 +1677,11 @@ gitcode-clone-hitmiss() {
 # （git_cdn.py:260/322 + lfs_cache_manager.py），故这里验三件事：
 #   ① git lfs 可用、HEAD 确有 LFS 跟踪文件（否则 SKIP，不判红）
 #   ② 两次独立 clone 各拉同一个 LFS 对象，均成功且字节数一致（有界，不拉全仓）
-#   ③ LFS endpoint 指向缓存后端主机（证明 batch 已被拦截改写，没绕去上游）
+#   ③ LFS batch endpoint 指向缓存后端主机（batch 被拦截）
+#   ④ 【决定性】对象实际下载域必须也是缓存后端——gitcode 的 download href 常指向
+#      lfs-cdn.gitcode.com，二者不是同一地址；只验 ③ 会把"绕过缓存"误判成命中
 gitcode-lfs() {
-    local base repo path url host d1 d2 ep t1 t2 s e n obj sz1 sz2
+    local base repo path url host d1 d2 ep t1 t2 s e n obj sz1 sz2 oid obj_url ohost
     base=$(_gitcode_base) || { echo "⚠️ 无法解析缓存后端基址，跳过 LFS（见 gitcode-config）"; return 2; }
     repo="${GITCODE_LFS_REPO:-$GITCODE_REPO}"
     path="${repo#*gitcode.com}"
@@ -1729,9 +1731,10 @@ gitcode-lfs() {
         echo "⚠️ 无法解析 LFS endpoint，仅留档"
     fi
 
-    # 只拉这一个对象（不拉全仓 GB 级 LFS），两次独立 clone 各拉一次
+    # 只拉这一个对象（不拉全仓 GB 级 LFS），两次独立 clone 各拉一次；
+    # GIT_CURL_VERBOSE 是为了取对象实际下载域（见下方断言）。
     s=$(date +%s%3N)
-    if ! (cd "$d1" && GIT_TERMINAL_PROMPT=0 git lfs pull --include="$obj" >"$RESULTS_DIR/gitcode-lfs-pull-1.log" 2>&1); then
+    if ! (cd "$d1" && GIT_TERMINAL_PROMPT=0 GIT_CURL_VERBOSE=1 git lfs pull --include="$obj" >"$RESULTS_DIR/gitcode-lfs-pull-1.log" 2>&1); then
         echo "❌ 第 1 次 git lfs pull 失败"
         tail -n 8 "$RESULTS_DIR/gitcode-lfs-pull-1.log" | sed 's/^/    | /'
         return 1
@@ -1742,6 +1745,25 @@ gitcode-lfs() {
         return 1
     fi
     sz1=$(stat -c%s "$d1/$obj" 2>/dev/null || echo 0)
+
+    # 关键取证：batch 的 endpoint 与对象下载用的是两个地址（actions.download.href），
+    # gitcode 的 href 若指向 lfs-cdn.gitcode.com（独立存储域），git-cdn 的
+    # hook_lfs_batch（href.replace(upstream, base_url)）就匹配不到 → 对象直连
+    # 上游存储，绕开缓存后端，此时"耗时下降"与缓存无关。
+    oid=$(cd "$d1" && git show HEAD:"$obj" 2>/dev/null | sed -n 's/^oid sha256://p' | head -1)
+    obj_url=$(grep -aoE "https?://[^ \"']*${oid:-__no_oid__}" "$RESULTS_DIR/gitcode-lfs-pull-1.log" 2>/dev/null | head -1)
+    if [ -n "$obj_url" ]; then
+        ohost="${obj_url#*://}"; ohost="${ohost%%/*}"
+        echo "对象下载 URL: $obj_url"
+        if [ "$ohost" = "$host" ]; then
+            echo "✅ LFS 对象下载经过缓存后端 $host"
+        else
+            echo "❌ LFS 对象下载绕过缓存后端（实际下载域 $ohost，期望 $host）——batch href 未被改写，git-cdn 的 LFS 缓存不生效"
+            [ "$GITCODE_STRICT" = "1" ] && return 1
+        fi
+    else
+        echo "⚠️ 未能从 pull 日志解析对象下载 URL（oid=${oid:-<未取到>}），仅留档"
+    fi
 
     if ! GIT_TERMINAL_PROMPT=0 git clone --depth 1 --single-branch -q "$url" "$d2" 2>"$RESULTS_DIR/gitcode-lfs-2.trace"; then
         echo "❌ 第 2 次 LFS clone 失败"
