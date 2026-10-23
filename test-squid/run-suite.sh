@@ -1655,6 +1655,12 @@ gitcode-clone-hitmiss() {
     grep -qiE '^< (cache-status:.*hit|x-cache: *hit|x-cache-status: *hit|age: *[1-9])' \
         "$RESULTS_DIR/gitcode-clone-2.trace" && hit="header"
 
+    # trace 只留请求行/主机/缓存头证据：原始 GIT_TRACE_CURL 单文件 40MB+，
+    # 上传 artifact 又慢又没价值（证据行已足够定位是否走后端/是否命中）。
+    for f in "$RESULTS_DIR/gitcode-clone-1.trace" "$RESULTS_DIR/gitcode-clone-2.trace"; do
+        [ -f "$f" ] && grep -aE '^< (cache-status|x-cache|age|HTTP)|^> (Host|GET|POST)' "$f" > "$f.small" && mv "$f.small" "$f"
+    done
+
     rm -rf "$d1" "$d2"
     if [ -n "$hit" ]; then
         echo "✅ 第 2 次响应头带缓存命中标记 → 后端已缓存该仓库"
@@ -1751,7 +1757,10 @@ gitcode-lfs() {
     # hook_lfs_batch（href.replace(upstream, base_url)）就匹配不到 → 对象直连
     # 上游存储，绕开缓存后端，此时"耗时下降"与缓存无关。
     oid=$(cd "$d1" && git show HEAD:"$obj" 2>/dev/null | sed -n 's/^oid sha256://p' | head -1)
-    obj_url=$(grep -aoE "https?://[^ \"']*${oid:-__no_oid__}" "$RESULTS_DIR/gitcode-lfs-pull-1.log" 2>/dev/null | head -1)
+    # 对象 URL 的 oid 是分段路径（objects/ae/6b/2603...），不是连续串，
+    # 所以按 "objects/<2>/<2>/<hex>" 形态匹配，不能拿整串 oid 去 grep。
+    obj_url=$(grep -aoE 'https?://[^ ]*/(lfs-objects|info/lfs/objects)/[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+' \
+                  "$RESULTS_DIR/gitcode-lfs-pull-1.log" 2>/dev/null | head -1)
     if [ -n "$obj_url" ]; then
         ohost="${obj_url#*://}"; ohost="${ohost%%/*}"
         echo "对象下载 URL: $obj_url"
