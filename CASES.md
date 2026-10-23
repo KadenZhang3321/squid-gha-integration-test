@@ -296,21 +296,32 @@ OBS 分支（规则 11 把 OBS 划入不重写范围），实际命中规则 12�
 - 根修方向：平台侧把 `squid-ca.pem` 换成 bundle（squid CA + 公共根拼接），
   让排他/union/追加三种语义全部自洽；runner 层 bootstrap 装齐后同格预期同红
 
-### gitcode 组（smart git proxy 缓存，R21，runner 层 opt-in）
+### gitcode 组（缓存后端，R21，容器层 opt-in）
 
 触发：`gh workflow run test-squid.yaml --ref main -f runner='["<label>"]' -f gitcode=1`
 （仅 `workflow_dispatch` 且 `gitcode=1` 时运行，常规 run 不含该 job）。
-前提：pod postStart 已把 `https://gitcode.com/` 重写到
-`http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080/gitcode.com/`。
+必须容器层：`insteadOf` 由 job pod 模板的 postStart 写入 `/root/.gitconfig`，
+runner 容器没有这条重写。
+
+两种后端（`-f gitcode_backend=`）：
+
+| 后端 | 集群/runner | 重写目标 |
+|---|---|---|
+| `smart-git-proxy`（默认） | gy-005 `linux-amd64-cpu-8-gy005`（PR #2236） | `http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080/gitcode.com/` |
+| `git-cdn-gitcode` | gy-006 `linux-aarch64-cpu-2-gitcdn-test`（仓库 vllm-ascend，PR #2237） | `http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000/` |
+
+脚本不硬编码 `/gitcode.com` 前缀段：从 `git ls-remote --get-url` 展开结果剥掉仓库路径反推基址，
+因此两种形态共用一套断言。`-f gitcode_direct=1` 跳过重写断言、直接打后端基址，
+用于目标 runner 无法派发（如 vllm-ascend 的 Actions 被禁用）时验证**缓存服务本身**。
 
 | 阶段 | 内容 | 判定 | 规则 |
 |---|---|---|---|
-| `gitcode-config` | 打印全局 `url.*.insteadOf`，用 `git ls-remote --get-url` 展开目标 URL | 指向 smart-git-proxy = PASS；未重写 = FAIL（`GITCODE_STRICT=1`，job 固定开启） | R21 |
-| `gitcode-refs-probe` | 对 `<proxy>/gitcode.com/<repo>/info/refs?service=git-upload-pack` 连发两次，抓状态码、耗时与缓存类响应头（`Cache-Status`/`X-Cache`/`Age`） | 200 且响应非空 = PASS；不可达 / 非 git 服务 = FAIL | R21 |
-| `gitcode-clone-hitmiss` | 同一 gitcode 仓库 `git clone --depth 1` 两遍，`GIT_TRACE_CURL` 取证实际对端主机 | 两遍成功且 trace 含 proxy 主机 = 路由 PASS；二遍命中缓存头 / 耗时 ≤70% / 两遍均 ≤5s 任一成立 = 缓存 PASS；否则 FAIL | R21 |
+| `gitcode-config` | 打印全局 `url.*.insteadOf`，用 `git ls-remote --get-url` 展开目标 URL 并反推基址 | 基址 == `GITCODE_PROXY` = PASS；未重写/指向本机 = FAIL（`GITCODE_STRICT=1`，job 固定开启）；`GITCODE_DIRECT=1` 时只留档 | R21 |
+| `gitcode-refs-probe` | 对 `<base>/<repo>/info/refs?service=git-upload-pack` 连发两次，抓状态码、耗时与缓存类响应头（`Cache-Status`/`X-Cache`/`Age`） | 200 且响应非空 = PASS；不可达 / 非 git 服务 = FAIL | R21 |
+| `gitcode-clone-hitmiss` | 同一 gitcode 仓库 `git clone --depth 1` 两遍，`GIT_TRACE_CURL` 取证实际对端主机 | 两遍成功且 trace 含后端主机 = 路由 PASS；二遍命中缓存头 / 耗时 ≤70% / 两遍均 ≤5s 任一成立 = 缓存 PASS；否则 FAIL | R21 |
 
 说明：该链路属 `.svc.cluster.local`（在 NO_PROXY 内）直连，**不经过 squid**，
-故本组不跑 `meta-trace`；结论只代表 smart git proxy 的缓存行为。
+故本组不跑 `meta-trace`；结论只代表缓存后端（smart git proxy / git-cdn）的行为。
 
 ## 结论口径
 

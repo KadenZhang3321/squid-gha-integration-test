@@ -1510,32 +1510,61 @@ ib-ascend-obs() {
 #   注意：本组流量【不应】经过 squid，故不跑 meta-trace。
 # =============================================================================
 GITCODE_REPO="${GITCODE_REPO:-https://gitcode.com/cann/catlass.git}"
+# 缓存后端基址。两种注入形态：
+#   gy-005  smart-git-proxy：http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080/gitcode.com/
+#   gy-006  git-cdn-gitcode：http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000/
+# 两者重写后 URL 只差"是否带 /gitcode.com 前缀段"，故本组统一从展开结果反推基址，
+# 不硬编码前缀段（GITCODE_PROXY 只作为期望值断言）。
 GITCODE_PROXY="${GITCODE_PROXY:-http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080}"
 GITCODE_STRICT="${GITCODE_STRICT:-0}"   # 1=重写缺失/无缓存收益时判红（定向验证用）
+GITCODE_DIRECT="${GITCODE_DIRECT:-0}"   # 1=跳过 insteadOf 断言，直接打 GITCODE_PROXY（验后端服务本身）
 
+_gitcode_repo_path() { printf '%s' "${GITCODE_REPO#*gitcode.com}"; }   # /cann/catlass.git
 _gitcode_proxied_url() { git ls-remote --get-url "$GITCODE_REPO" 2>/dev/null; }
+_gitcode_norm() { printf '%s' "${1%/}"; }
+# 本次实际访问的起点：direct 用 GITCODE_PROXY；否则从 insteadOf 展开结果剥掉仓库路径
+_gitcode_base() {
+    local u path origin
+    if [ "$GITCODE_DIRECT" = "1" ]; then _gitcode_norm "$GITCODE_PROXY"; return 0; fi
+    u=$(_gitcode_proxied_url); path=$(_gitcode_repo_path)
+    case "$u" in
+        *"$path")
+            u=$(_gitcode_norm "${u%"$path"}")
+            # 展开后仍指向 gitcode.com 本体 = 未重写，不能拿它当缓存后端去探测
+            origin=$(_gitcode_norm "${GITCODE_REPO%"$path"}")
+            [ "$u" = "$origin" ] && return 1
+            printf '%s' "$u"
+            ;;
+        *) return 1 ;;
+    esac
+}
 
 gitcode-config() {
     echo "--- 全局 insteadOf 重写 ---"
     git config --global --get-regexp '^url\..*\.insteadof$' || echo "(无 insteadOf 配置)"
-    local u
+    local u base
     u=$(_gitcode_proxied_url)
     echo "URL 展开: $GITCODE_REPO → ${u:-<空>}"
-    case "$u" in
-        "$GITCODE_PROXY"/*)
-            echo "✅ gitcode.com 已重写到 smart git proxy"
-            return 0
-            ;;
-    esac
-    echo "⚠️ 未重写到 $GITCODE_PROXY（postStart 未生效 / 该 runner 未注入）"
+    if [ "$GITCODE_DIRECT" = "1" ]; then
+        echo "ℹ️ GITCODE_DIRECT=1：跳过 insteadOf 断言，直连 $(_gitcode_base)（验缓存后端服务本身）"
+        return 0
+    fi
+    base=$(_gitcode_base) || base=""
+    echo "重写起点: ${base:-<未解析>}（期望 $(_gitcode_norm "$GITCODE_PROXY")）"
+    if [ "$base" = "$(_gitcode_norm "$GITCODE_PROXY")" ]; then
+        echo "✅ gitcode.com 已重写到缓存后端 $base"
+        return 0
+    fi
+    echo "⚠️ 未重写到 $(_gitcode_norm "$GITCODE_PROXY")（postStart 未生效 / 该 runner 未注入）"
     if [ "$GITCODE_STRICT" = "1" ]; then echo "❌ GITCODE_STRICT=1，判失败"; return 1; fi
     return 2
 }
 
 gitcode-refs-probe() {
-    local path="${GITCODE_REPO#*gitcode.com}"   # /cann/catlass.git
-    local url="${GITCODE_PROXY}/gitcode.com${path}/info/refs?service=git-upload-pack"
-    local i hdrs out code t
+    local base path url i hdrs out code t
+    path=$(_gitcode_repo_path)                 # /cann/catlass.git
+    base=$(_gitcode_base) || { echo "⚠️ 无法解析缓存后端基址（见 gitcode-config）"; return 2; }
+    url="${base}${path}/info/refs?service=git-upload-pack"
     echo "探测端点: $url"
     for i in 1 2; do
         hdrs="$RESULTS_DIR/gitcode-refs-$i.headers"
@@ -1563,19 +1592,17 @@ gitcode-refs-probe() {
 }
 
 gitcode-clone-hitmiss() {
-    local u d1 d2 s e t1 t2 host hit=""
-    u=$(_gitcode_proxied_url)
-    case "$u" in
-        "$GITCODE_PROXY"/*) ;;
-        *) echo "⚠️ URL 未重写，跳过 clone（见 gitcode-config）"; return 2 ;;
-    esac
-    host="${GITCODE_PROXY#*://}"; host="${host%%/*}"
+    local base url d1 d2 s e t1 t2 host hit=""
+    base=$(_gitcode_base) || { echo "⚠️ 无法解析缓存后端基址，跳过 clone（见 gitcode-config）"; return 2; }
+    url="${base}$(_gitcode_repo_path)"
+    host="${base#*://}"; host="${host%%/*}"
+    echo "clone 目标: $url（对端 $host）"
     d1="$RESULTS_DIR/gitcode-clone-1"; d2="$RESULTS_DIR/gitcode-clone-2"
     rm -rf "$d1" "$d2"
 
     s=$(date +%s%3N)
     if ! GIT_TERMINAL_PROMPT=0 GIT_TRACE_CURL=1 \
-            git clone --depth 1 --single-branch -q "$GITCODE_REPO" "$d1" \
+            git clone --depth 1 --single-branch -q "$url" "$d1" \
             2>"$RESULTS_DIR/gitcode-clone-1.trace"; then
         echo "❌ 第 1 次 clone 失败（重写后不可拉取）"
         tail -n 8 "$RESULTS_DIR/gitcode-clone-1.trace" | sed 's/^/    | /'
@@ -1585,7 +1612,7 @@ gitcode-clone-hitmiss() {
 
     s=$(date +%s%3N)
     if ! GIT_TERMINAL_PROMPT=0 GIT_TRACE_CURL=1 \
-            git clone --depth 1 --single-branch -q "$GITCODE_REPO" "$d2" \
+            git clone --depth 1 --single-branch -q "$url" "$d2" \
             2>"$RESULTS_DIR/gitcode-clone-2.trace"; then
         echo "❌ 第 2 次 clone 失败"
         tail -n 8 "$RESULTS_DIR/gitcode-clone-2.trace" | sed 's/^/    | /'

@@ -52,7 +52,19 @@ on:
         required: false
         default: '0'
       gitcode:
-        description: '1=启用 gitcode.com → smart git proxy 的 insteadOf 重写与缓存命中验证（需目标 runner 已注入）'
+        description: '1=启用 gitcode.com → 缓存后端的 insteadOf 重写与缓存命中验证（需目标 runner 已注入；必须容器层）'
+        required: false
+        default: '0'
+      gitcode_backend:
+        description: 'gitcode 缓存后端：smart-git-proxy（gy-005）/ git-cdn-gitcode（gy-006 #2237）'
+        required: false
+        type: choice
+        options:
+          - smart-git-proxy
+          - git-cdn-gitcode
+        default: smart-git-proxy
+      gitcode_direct:
+        description: '1=跳过 insteadOf 断言，直连缓存后端（用于目标 runner 未注入重写时验证后端服务本身）'
         required: false
         default: '0'
   pull_request:
@@ -370,6 +382,10 @@ jobs:
       - name: 运行 gitcode 缓存验证（容器层）
         env:
           GITCODE_STRICT: '1'   # 定向验证：重写缺失 / 无缓存收益 → 判红
+          GITCODE_DIRECT: ${{ inputs.gitcode_direct }}
+          # 两种后端只差基址：smart-git-proxy 带 /gitcode.com 前缀段，
+          # git-cdn-gitcode（#2237）直接以仓库路径挂在根上；脚本从展开结果反推。
+          GITCODE_PROXY: ${{ inputs.gitcode_backend == 'git-cdn-gitcode' && 'http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000' || 'http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080' }}
         run: bash test-squid/run-suite.sh --mode gitcode --container
 
       - name: 上传结果
