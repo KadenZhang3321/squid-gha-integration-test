@@ -1576,7 +1576,9 @@ gitcode-refs-probe() {
     echo "探测端点: $url"
     for i in 1 2; do
         hdrs="$RESULTS_DIR/gitcode-refs-$i.headers"
-        if ! out=$(curl -sS -o "$RESULTS_DIR/gitcode-refs-$i.bin" -D "$hdrs" \
+        # UA 必须是 git：git-cdn 的 redirect_browsers() 把不含 "git" 的客户端
+        # （curl/wget 等）308 跳回上游，只有 UA 含 git 才走缓存逻辑。
+        if ! out=$(curl -sS -A 'git/2.43.0' -o "$RESULTS_DIR/gitcode-refs-$i.bin" -D "$hdrs" \
                        -w '%{http_code} %{time_total}' --max-time 30 "$url" 2>/dev/null); then
             echo "⚠️ smart git proxy 不可达（$url）"
             [ "$GITCODE_STRICT" = "1" ] && return 1
