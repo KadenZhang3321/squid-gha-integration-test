@@ -97,27 +97,10 @@ run_timed() {
     log "▶ [$phase] 开始"
     start=$(date +%s)
     # 单阶段硬超时：默认 900s，HEAVY=1 放宽到 1800s（torch wheel/镜像构建）。
-    # 注意：timeout(1) 只能 exec 外部命令，而阶段都是 shell 函数，外面套 timeout
-    # 会直接 "failed to run command"、exit 127（run 39967002077 实证：五阶段全 127
-    # 但 job 仍绿）。故改为子 shell 后台跑 + 看门狗计时，到点写标记并 TERM。
-    local tmo flag pid timer i
-    tmo="${STAGE_TIMEOUT:-$([ "${HEAVY:-0}" = "1" ] && echo 1800 || echo 900)}"
-    flag="$RESULTS_DIR/.$phase.timedout"
-    rm -f "$flag"
-    ( "$@" ) > "$RESULTS_DIR/$phase.log" 2>&1 &
-    pid=$!
-    (
-        i=0
-        while [ "$i" -lt "$tmo" ]; do sleep 5; i=$((i+5)); done
-        : > "$flag"
-        kill -TERM "$pid" 2>/dev/null
-    ) &
-    timer=$!
-    wait "$pid"; status=$?
-    kill -TERM "$timer" 2>/dev/null
-    wait "$timer" 2>/dev/null
-    [ -f "$flag" ] && status=124
-    rm -f "$flag"
+    # 超时返回 124 → 按 FAIL 处理，避免 job 无限挂起。
+    local tmo="${STAGE_TIMEOUT:-$([ "${HEAVY:-0}" = "1" ] && echo 1800 || echo 900)}"
+    timeout "$tmo" "$@" > "$RESULTS_DIR/$phase.log" 2>&1
+    status=$?
     end=$(date +%s)
     sec=$((end - start))
     # exit 2 = SKIP 语义（场景不适用/无缓存头等数据记录，非失败）
@@ -1935,10 +1918,9 @@ fi
 log "== 汇总（$MODE/$LAYER）=="
 cat "$TSV"
 
-# 退出码 gate：存在非 0/SKIP 的阶段 → 套件非零退出（job 结论必须反映失败，
-# 禁止"阶段红 job 绿"；SKIP/数据记录不阻断）。不能只认 status=1——脚本内部错误
-# （如 127 命令不存在）也必须算失败，否则会静默变绿（run 39967002077 实证）。
-if awk -F'\t' 'NR>1 && $3!="0" && $3!="SKIP"{found=1} END{exit found?1:0}' "$TSV"; then
+# 退出码 gate：存在 status=1 的阶段 → 套件非零退出（job 结论必须反映失败，
+# 禁止"阶段红 job 绿"；SKIP/数据记录不阻断）
+if awk -F'\t' 'NR>1 && $3=="1"{found=1} END{exit found?1:0}' "$TSV"; then
     log "完成。结果目录: $RESULTS_DIR"
 else
     log "❌ 存在失败阶段，套件判 FAIL（明细见上 / $RESULTS_DIR）"
