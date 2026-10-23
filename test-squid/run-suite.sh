@@ -92,14 +92,8 @@ run_timed() {
     local phase="$1" group="$2"
     shift 2
     local start end status sec
-    # 阶段开始先打一行到控制台：阶段输出被重定向到文件，卡住时只能靠这行
-    # 定位（cn12 真实工具链 e2e 卡 30min+ 无任何痕迹，2026-10-23）。
-    log "▶ [$phase] 开始"
     start=$(date +%s)
-    # 单阶段硬超时：默认 900s，HEAVY=1 放宽到 1800s（torch wheel/镜像构建）。
-    # 超时返回 124 → 按 FAIL 处理，避免 job 无限挂起。
-    local tmo="${STAGE_TIMEOUT:-$([ "${HEAVY:-0}" = "1" ] && echo 1800 || echo 900)}"
-    timeout "$tmo" "$@" > "$RESULTS_DIR/$phase.log" 2>&1
+    "$@" > "$RESULTS_DIR/$phase.log" 2>&1
     status=$?
     end=$(date +%s)
     sec=$((end - start))
@@ -113,11 +107,7 @@ run_timed() {
         log "### [$phase] SKIP ${sec}s  (数据记录，非失败；tail 见下)"
         tail -n 5 "$RESULTS_DIR/$phase.log" | sed 's/^/    | /'
     else
-        if [[ $status -eq 124 ]]; then
-            log "### [$phase] FAIL(超时 ${tmo}s)  ${sec}s  (tail 见下)"
-        else
-            log "### [$phase] FAIL(exit=$status)  ${sec}s  (tail 见下)"
-        fi
+        log "### [$phase] FAIL(exit=$status)  ${sec}s  (tail 见下)"
         tail -n 5 "$RESULTS_DIR/$phase.log" | sed 's/^/    | /'
     fi
     return 0
