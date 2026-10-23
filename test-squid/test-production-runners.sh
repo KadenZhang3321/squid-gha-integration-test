@@ -16,6 +16,8 @@
 #   ./test-squid/test-production-runners.sh --list             # 只列标签不触发
 #   ./test-squid/test-production-runners.sh --no-watch         # 只触发不等结果
 #   ./test-squid/test-production-runners.sh --heavy 1          # 透传给 workflow
+#   ./test-squid/test-production-runners.sh --only cpu-2-gy001 --gitcode gitcache
+#                                                              # 顺带跑 gitcode 组（后端 smart-git-proxy|git-cdn-gitcode|gitcache）
 #
 # 退出码：任一 runner 的 run conclusion != success → 1；全部绿 → 0
 # =============================================================================
@@ -33,7 +35,7 @@ POLL_INTERVAL=30
 #   标签 | 集群 | 注入状态备注（集群侧变更由平台侧维护，此处仅留档）
 # ---------------------------------------------------------------------------
 RUNNERS=(
-    "linux-amd64-cpu-2-gy001|gy-001|新增（2026-10-10 上产线）"
+    "linux-amd64-cpu-2-gy001|gy-001|新增（2026-10-10 上产线）；gitcode 后端为 gitcache（git-cache-http-server，非 git-cdn-gitcode）"
     "linux-aarch64-a3-2-aiframe|aiframework|caNamespaces 已有；aarch64（amd64 容量死锁，run 38370252096 实证换型）"
     "linux-amd64-cpu-2-gy003|gy-003|caNamespaces 已有，仅注入"
     "linux-amd64-cpu-2-hk001|hk-001|新增 postStart（原无 lifecycle）；CM 在 ascend-gha-runners-hk-001 ns"

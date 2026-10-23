@@ -56,12 +56,13 @@ on:
         required: false
         default: '0'
       gitcode_backend:
-        description: 'gitcode 缓存后端：smart-git-proxy（gy-005）/ git-cdn-gitcode（gy-006 #2237）'
+        description: 'gitcode 缓存后端：smart-git-proxy（gy-005）/ git-cdn-gitcode（gy-006 #2237 及生产集群）/ gitcache（gy-001 git-cache-http-server）'
         required: false
         type: choice
         options:
           - smart-git-proxy
           - git-cdn-gitcode
+          - gitcache
         default: smart-git-proxy
       gitcode_direct:
         description: '1=跳过 insteadOf 断言，直连缓存后端（用于目标 runner 未注入重写时验证后端服务本身）'
@@ -401,9 +402,10 @@ jobs:
         env:
           GITCODE_STRICT: '1'   # 定向验证：重写缺失 / 无缓存收益 → 判红
           GITCODE_DIRECT: ${{ inputs.gitcode_direct }}
-          # 两种后端只差基址：smart-git-proxy 带 /gitcode.com 前缀段，
-          # git-cdn-gitcode（#2237）直接以仓库路径挂在根上；脚本从展开结果反推。
-          GITCODE_PROXY: ${{ inputs.gitcode_backend == 'git-cdn-gitcode' && 'http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000' || 'http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080' }}
+          # 三种后端只差基址：smart-git-proxy 带 /gitcode.com 前缀段，
+          # git-cdn-gitcode（#2237）与 gy-001 的 gitcache（git-cache-http-server）
+          # 都是直接以仓库路径挂在根上；脚本从展开结果反推。
+          GITCODE_PROXY: ${{ inputs.gitcode_backend == 'git-cdn-gitcode' && 'http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000' || (inputs.gitcode_backend == 'gitcache' && 'http://git-cache-http-server.git-cache.svc.cluster.local:8080' || 'http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080') }}
           GITCODE_LFS_REPO: ${{ inputs.gitcode_lfs_repo }}
         run: bash test-squid/run-suite.sh --mode gitcode --container
 
