@@ -1675,11 +1675,11 @@ gitcode-clone-hitmiss() {
 
 # LFS 验证：git-cdn 会拦 info/lfs/objects/batch 并把 objects href 改写指向自己
 # （git_cdn.py:260/322 + lfs_cache_manager.py），故这里验三件事：
-#   ① git lfs 可用、目标仓库确含 LFS 对象（否则 SKIP，不判红）
-#   ② 两次独立 clone 各自 git lfs pull 均成功，对象全部落地
+#   ① git lfs 可用、HEAD 确有 LFS 跟踪文件（否则 SKIP，不判红）
+#   ② 两次独立 clone 各拉同一个 LFS 对象，均成功且字节数一致（有界，不拉全仓）
 #   ③ LFS endpoint 指向缓存后端主机（证明 batch 已被拦截改写，没绕去上游）
 gitcode-lfs() {
-    local base repo path url host d1 d2 ep t1 t2 s e n1 n2
+    local base repo path url host d1 d2 ep t1 t2 s e n obj sz1 sz2
     base=$(_gitcode_base) || { echo "⚠️ 无法解析缓存后端基址，跳过 LFS（见 gitcode-config）"; return 2; }
     repo="${GITCODE_LFS_REPO:-$GITCODE_REPO}"
     path="${repo#*gitcode.com}"
@@ -1699,19 +1699,23 @@ gitcode-lfs() {
     d1="$RESULTS_DIR/gitcode-lfs-1"; d2="$RESULTS_DIR/gitcode-lfs-2"
     rm -rf "$d1" "$d2"
     export GIT_LFS_SKIP_SMUDGE=1
-    # LFS 仓库（如 ascend/pytorch）历史体积大，clone 用 --depth 1 只为取
-    # .gitattributes 与指针；LFS 对象由 git lfs pull 单独拉，与浅克隆无关。
+    # LFS 仓库（如 Ascend/pytorch，LFS 体量 GB 级）历史与对象都大：clone 用
+    # --depth 1 只取 HEAD 的指针，真正的对象下载由下面的 git lfs pull 有界执行。
     if ! GIT_TERMINAL_PROMPT=0 git clone --depth 1 --single-branch -q "$url" "$d1" 2>"$RESULTS_DIR/gitcode-lfs-1.trace"; then
         echo "❌ LFS 用例 clone 失败"
         tail -n 8 "$RESULTS_DIR/gitcode-lfs-1.trace" | sed 's/^/    | /'
         return 1
     fi
-    if ! grep -rqE --include='.gitattributes' 'filter=lfs' "$d1" 2>/dev/null; then
-        echo "⚠️ $repo 的 .gitattributes 不含 filter=lfs → SKIP（用 GITCODE_LFS_REPO 指向真实 LFS 仓库再验）"
+    # 用 ls-files 判定"HEAD 是否真有 LFS 跟踪文件"（.gitattributes 可能散在
+    # 子目录、也可能只存在于历史），比只 grep 根 .gitattributes 准确。
+    n=$(cd "$d1" && git lfs ls-files 2>/dev/null | wc -l)
+    obj=$(cd "$d1" && git lfs ls-files -n 2>/dev/null | head -1)
+    if [ -z "$obj" ]; then
+        echo "⚠️ $repo 在 HEAD 没有 LFS 跟踪文件（git lfs ls-files 为空）→ SKIP"
         rm -rf "$d1"
         return 2
     fi
-    echo "✅ 目标仓库含 LFS 规则（.gitattributes filter=lfs）"
+    echo "✅ HEAD 含 LFS 文件 $n 个；取首个对象做有界验证: $obj"
 
     ep=$(cd "$d1" && git lfs env 2>/dev/null | sed -n 's/^Endpoint=\(.*\) (.*/\1/p' | head -1)
     echo "LFS endpoint: ${ep:-<未解析>}"
@@ -1725,32 +1729,37 @@ gitcode-lfs() {
         echo "⚠️ 无法解析 LFS endpoint，仅留档"
     fi
 
+    # 只拉这一个对象（不拉全仓 GB 级 LFS），两次独立 clone 各拉一次
     s=$(date +%s%3N)
-    if ! (cd "$d1" && GIT_TERMINAL_PROMPT=0 git lfs pull >"$RESULTS_DIR/gitcode-lfs-pull-1.log" 2>&1); then
+    if ! (cd "$d1" && GIT_TERMINAL_PROMPT=0 git lfs pull --include="$obj" >"$RESULTS_DIR/gitcode-lfs-pull-1.log" 2>&1); then
         echo "❌ 第 1 次 git lfs pull 失败"
         tail -n 8 "$RESULTS_DIR/gitcode-lfs-pull-1.log" | sed 's/^/    | /'
         return 1
     fi
     e=$(date +%s%3N); t1=$((e-s))
-    n1=$(cd "$d1" && git lfs ls-files 2>/dev/null | wc -l)
+    if head -c 64 "$d1/$obj" 2>/dev/null | grep -q 'version https://git-lfs'; then
+        echo "❌ $obj 仍是 LFS pointer，对象未真正下载"
+        return 1
+    fi
+    sz1=$(stat -c%s "$d1/$obj" 2>/dev/null || echo 0)
 
     if ! GIT_TERMINAL_PROMPT=0 git clone --depth 1 --single-branch -q "$url" "$d2" 2>"$RESULTS_DIR/gitcode-lfs-2.trace"; then
         echo "❌ 第 2 次 LFS clone 失败"
         return 1
     fi
     s=$(date +%s%3N)
-    if ! (cd "$d2" && GIT_TERMINAL_PROMPT=0 git lfs pull >"$RESULTS_DIR/gitcode-lfs-pull-2.log" 2>&1); then
+    if ! (cd "$d2" && GIT_TERMINAL_PROMPT=0 git lfs pull --include="$obj" >"$RESULTS_DIR/gitcode-lfs-pull-2.log" 2>&1); then
         echo "❌ 第 2 次 git lfs pull 失败"
         tail -n 8 "$RESULTS_DIR/gitcode-lfs-pull-2.log" | sed 's/^/    | /'
         return 1
     fi
     e=$(date +%s%3N); t2=$((e-s))
-    n2=$(cd "$d2" && git lfs ls-files 2>/dev/null | wc -l)
+    sz2=$(stat -c%s "$d2/$obj" 2>/dev/null || echo 0)
 
     rm -rf "$d1" "$d2"
-    echo "LFS 对象数: $n1 / $n2；pull 耗时: 第1次 ${t1}ms / 第2次 ${t2}ms"
-    [ "$n1" -gt 0 ] && [ "$n1" = "$n2" ] || { echo "❌ 两次 pull 对象数不一致（$n1 vs $n2）"; return 1; }
-    echo "✅ 两次独立 clone 的 LFS 全量拉取均成功（对象 $n1 个），经 $host"
+    echo "LFS 对象 $obj 大小: ${sz1}B / ${sz2}B；pull 耗时: 第1次 ${t1}ms / 第2次 ${t2}ms"
+    [ "$sz1" -gt 0 ] && [ "$sz1" = "$sz2" ] || { echo "❌ 两次下载的对象大小不一致（${sz1} vs ${sz2}）"; return 1; }
+    echo "✅ 两次独立 clone 的 LFS 对象下载均成功且大小一致（${sz1}B），经 $host"
     if [ "$t1" -gt 0 ] && [ "$t2" -le $((t1 * 70 / 100)) ]; then
         echo "✅ 第 2 次 LFS pull 耗时下降 $((100 - t2 * 100 / t1))% → LFS 对象命中缓存"
     else
