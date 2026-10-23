@@ -51,6 +51,10 @@ on:
         description: '1=新增直连域（云元数据/LLM 统计/API）必须全部命中 NO_PROXY（gy-006 cpu-2 配置验证用）'
         required: false
         default: '0'
+      gitcode:
+        description: '1=启用 gitcode.com → smart git proxy 的 insteadOf 重写与缓存命中验证（需目标 runner 已注入）'
+        required: false
+        default: '0'
   pull_request:
     paths:
       - 'test-squid/**'
@@ -341,6 +345,41 @@ jobs:
           path: /tmp/test-squid-results/
           if-no-files-found: warn
 
+  gitcode:
+    name: gitcode × smart git proxy 缓存（opt-in，容器层）
+    needs: [container-pkg]
+    # 定向验证（R21）：pod postStart 追加
+    #   url.<smart-git-proxy>/gitcode.com/.insteadOf = https://gitcode.com/
+    # 后，gitcode.com 的 git 拉取是否真的走 smart git proxy、重复拉取是否命中
+    # 缓存。该 service 属 .svc.cluster.local（NO_PROXY）→ 直连绕开 squid，
+    # 因此本组不跑 meta-trace，也不代表 squid 的缓存能力。
+    #
+    # ⚠️ 必须容器层：insteadOf 由 job pod 模板（ConfigMap default.yaml）的
+    # postStart 写入 /root/.gitconfig，只对 `container:` 作业容器生效；
+    # runner 容器走的是 AutoscalingRunnerSet values.yaml 的 env/postStart，
+    # 没有这条重写（gy-005 cpu-8 实测），runner 层跑必判"未重写"。
+    # 挂在容器链末尾串行（issue #2 挂死竞态）；always() 保证前面环节失败
+    # 时这条定向验证仍能给出结论。
+    if: always() && github.event_name == 'workflow_dispatch' && inputs.gitcode == '1'
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 运行 gitcode 缓存验证（容器层）
+        env:
+          GITCODE_STRICT: '1'   # 定向验证：重写缺失 / 无缓存收益 → 判红
+        run: bash test-squid/run-suite.sh --mode gitcode --container
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-squid-gitcode
+          path: /tmp/test-squid-results/
+          if-no-files-found: warn
+
   miss-p95:
     name: MISS p95 假慢复现（broker 长轮询诊断）
     # 2026-10-09 SquidMissP95Slow 告警诊断的复现场景：GHA runner 保活长轮询
@@ -471,7 +510,7 @@ jobs:
 
   summary:
     name: 汇总
-    needs: [function, concurrency, vllm, parity, tools, upstream, imagebuild, cabundle, miss-p95, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95, container-imagebuild, container-cabundle, container-pkg]
+    needs: [function, concurrency, vllm, parity, tools, upstream, imagebuild, cabundle, miss-p95, gitcode, container-function, container-concurrency, container-vllm, container-tools, container-miss-p95, container-imagebuild, container-cabundle, container-pkg]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -485,7 +524,7 @@ jobs:
         if: always()
         run: |
           echo "## test-squid 汇总" >> "$GITHUB_STEP_SUMMARY"
-          for d in test-squid-function test-squid-concurrency test-squid-vllm test-squid-parity test-squid-upstream test-squid-imagebuild test-squid-cabundle test-squid-tools test-squid-miss-p95 \
+          for d in test-squid-function test-squid-concurrency test-squid-vllm test-squid-parity test-squid-upstream test-squid-imagebuild test-squid-cabundle test-squid-tools test-squid-miss-p95 test-squid-gitcode \
                    test-squid-container-function test-squid-container-concurrency test-squid-container-vllm test-squid-container-tools test-squid-container-miss-p95 test-squid-container-imagebuild test-squid-container-cabundle test-squid-container-pkg; do
             if [ -f "$d/timings.tsv" ] || [ -f "$d/probes.tsv" ]; then
               echo "### $d" >> "$GITHUB_STEP_SUMMARY"

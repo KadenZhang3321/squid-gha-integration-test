@@ -1498,6 +1498,131 @@ ib-ascend-obs() {
 }
 
 # =============================================================================
+# gitcode 组阶段（smart git proxy 缓存验证，R21）
+#   前提：pod postStart 往 /root/.gitconfig 追加
+#     [url "http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080/gitcode.com/"]
+#         insteadOf = https://gitcode.com/
+#   该 service 属 .svc.cluster.local（在 NO_PROXY 内）→ 直连绕开 squid，
+#   缓存由 smart git proxy 自己负责。本组只回答三个问题：
+#     ① 重写是否生效（git ls-remote --get-url 展开后是否指向 proxy）
+#     ② 拉取是否真的走 proxy（GIT_TRACE_CURL 里的 Host/请求行）
+#     ③ 重复拉取是否命中缓存（二遍耗时 / 缓存响应头）
+#   注意：本组流量【不应】经过 squid，故不跑 meta-trace。
+# =============================================================================
+GITCODE_REPO="${GITCODE_REPO:-https://gitcode.com/cann/catlass.git}"
+GITCODE_PROXY="${GITCODE_PROXY:-http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080}"
+GITCODE_STRICT="${GITCODE_STRICT:-0}"   # 1=重写缺失/无缓存收益时判红（定向验证用）
+
+_gitcode_proxied_url() { git ls-remote --get-url "$GITCODE_REPO" 2>/dev/null; }
+
+gitcode-config() {
+    echo "--- 全局 insteadOf 重写 ---"
+    git config --global --get-regexp '^url\..*\.insteadof$' || echo "(无 insteadOf 配置)"
+    local u
+    u=$(_gitcode_proxied_url)
+    echo "URL 展开: $GITCODE_REPO → ${u:-<空>}"
+    case "$u" in
+        "$GITCODE_PROXY"/*)
+            echo "✅ gitcode.com 已重写到 smart git proxy"
+            return 0
+            ;;
+    esac
+    echo "⚠️ 未重写到 $GITCODE_PROXY（postStart 未生效 / 该 runner 未注入）"
+    if [ "$GITCODE_STRICT" = "1" ]; then echo "❌ GITCODE_STRICT=1，判失败"; return 1; fi
+    return 2
+}
+
+gitcode-refs-probe() {
+    local path="${GITCODE_REPO#*gitcode.com}"   # /cann/catlass.git
+    local url="${GITCODE_PROXY}/gitcode.com${path}/info/refs?service=git-upload-pack"
+    local i hdrs out code t
+    echo "探测端点: $url"
+    for i in 1 2; do
+        hdrs="$RESULTS_DIR/gitcode-refs-$i.headers"
+        if ! out=$(curl -sS -o "$RESULTS_DIR/gitcode-refs-$i.bin" -D "$hdrs" \
+                       -w '%{http_code} %{time_total}' --max-time 30 "$url" 2>/dev/null); then
+            echo "⚠️ smart git proxy 不可达（$url）"
+            [ "$GITCODE_STRICT" = "1" ] && return 1
+            return 2
+        fi
+        code=${out%% *}; t=${out##* }
+        printf '%s\t%s\t%s\n' "$url" "$code" "$t" >> "$PROBES"
+        echo "第 ${i} 次: http=$code time=${t}s"
+        grep -iE '^(cache-status|x-cache|x-cache-status|age|via|server):' "$hdrs" 2>/dev/null \
+            | tr -d '\r' | sed 's/^/    | /' || true
+    done
+    [ "$code" = "200" ] || { echo "❌ info/refs 非 200（$code）"; return 1; }
+    if grep -q 'git-upload-pack' "$RESULTS_DIR/gitcode-refs-2.bin"; then
+        echo "✅ refs 广告正常（smart HTTP，含 git-upload-pack）"
+    elif [ -s "$RESULTS_DIR/gitcode-refs-2.bin" ]; then
+        echo "✅ refs 响应非空（dumb HTTP 形态，无 service 广告）"
+    else
+        echo "❌ refs 响应为空，端点不是 git 服务"
+        return 1
+    fi
+}
+
+gitcode-clone-hitmiss() {
+    local u d1 d2 s e t1 t2 host hit=""
+    u=$(_gitcode_proxied_url)
+    case "$u" in
+        "$GITCODE_PROXY"/*) ;;
+        *) echo "⚠️ URL 未重写，跳过 clone（见 gitcode-config）"; return 2 ;;
+    esac
+    host="${GITCODE_PROXY#*://}"; host="${host%%/*}"
+    d1="$RESULTS_DIR/gitcode-clone-1"; d2="$RESULTS_DIR/gitcode-clone-2"
+    rm -rf "$d1" "$d2"
+
+    s=$(date +%s%3N)
+    if ! GIT_TERMINAL_PROMPT=0 GIT_TRACE_CURL=1 \
+            git clone --depth 1 --single-branch -q "$GITCODE_REPO" "$d1" \
+            2>"$RESULTS_DIR/gitcode-clone-1.trace"; then
+        echo "❌ 第 1 次 clone 失败（重写后不可拉取）"
+        tail -n 8 "$RESULTS_DIR/gitcode-clone-1.trace" | sed 's/^/    | /'
+        return 1
+    fi
+    e=$(date +%s%3N); t1=$((e-s))
+
+    s=$(date +%s%3N)
+    if ! GIT_TERMINAL_PROMPT=0 GIT_TRACE_CURL=1 \
+            git clone --depth 1 --single-branch -q "$GITCODE_REPO" "$d2" \
+            2>"$RESULTS_DIR/gitcode-clone-2.trace"; then
+        echo "❌ 第 2 次 clone 失败"
+        tail -n 8 "$RESULTS_DIR/gitcode-clone-2.trace" | sed 's/^/    | /'
+        return 1
+    fi
+    e=$(date +%s%3N); t2=$((e-s))
+
+    echo "耗时: 第1次 ${t1}ms / 第2次 ${t2}ms"
+    if grep -q "$host" "$RESULTS_DIR/gitcode-clone-1.trace"; then
+        echo "✅ clone 实际经过 smart git proxy（trace 含 $host）"
+    else
+        echo "❌ clone 未经过 smart git proxy（trace 无 $host）——insteadOf 未生效"
+        return 1
+    fi
+
+    grep -qiE '^< (cache-status:.*hit|x-cache: *hit|x-cache-status: *hit|age: *[1-9])' \
+        "$RESULTS_DIR/gitcode-clone-2.trace" && hit="header"
+
+    rm -rf "$d1" "$d2"
+    if [ -n "$hit" ]; then
+        echo "✅ 第 2 次响应头带缓存命中标记 → smart git proxy 已缓存该仓库"
+        return 0
+    fi
+    if [ "$t1" -gt 0 ] && [ "$t2" -le $((t1 * 70 / 100)) ]; then
+        echo "✅ 第 2 次耗时下降 $((100 - t2 * 100 / t1))% → 命中 smart git proxy 缓存"
+        return 0
+    fi
+    if [ "$t1" -le 5000 ] && [ "$t2" -le 5000 ]; then
+        echo "✅ 两遍均 ≤5s（缓存已预热，无冷缓存对照）"
+        return 0
+    fi
+    echo "⚠️ 第 2 次未见缓存收益（t1=${t1}ms t2=${t2}ms）——smart git proxy 可能未缓存该仓库"
+    if [ "$GITCODE_STRICT" = "1" ]; then echo "❌ GITCODE_STRICT=1，判失败"; return 1; fi
+    return 2
+}
+
+# =============================================================================
 # 主流程
 # =============================================================================
 log "== test-squid run-suite mode=$MODE =="
@@ -1578,8 +1703,15 @@ elif [ "$MODE" = "pkg" ]; then
     [ "$LAYER" = "container" ] && run_timed ca-trust "$LAYER" ca-trust
     run_timed pkg-dnf           "$LAYER" pkg-dnf
     run_timed pkg-yum           "$LAYER" pkg-yum
+elif [ "$MODE" = "gitcode" ]; then
+    # R21：gitcode.com → smart git proxy 的 insteadOf 重写 + 缓存命中验证
+    # （流量走 .svc.cluster.local 直连，不经过 squid，故不跑 meta-trace）
+    run_timed env-snapshot          "$LAYER" env-snapshot
+    run_timed gitcode-config        "$LAYER" gitcode-config
+    run_timed gitcode-refs-probe    "$LAYER" gitcode-refs-probe
+    run_timed gitcode-clone-hitmiss "$LAYER" gitcode-clone-hitmiss
 else
-    echo "未知 mode: $MODE（可选 function | concurrency | vllm | parity | upstream | imagebuild | cabundle | tools | pkg）" >&2
+    echo "未知 mode: $MODE（可选 function | concurrency | vllm | parity | upstream | imagebuild | cabundle | tools | pkg | gitcode）" >&2
     exit 2
 fi
 
