@@ -32,6 +32,7 @@ gh workflow run test-squid.yaml --repo ascend-gha-runners/squid-gha-integration-
 | `gitcode` | `0` | `1` = 启用 gitcode.com → 缓存后端的 insteadOf 重写与缓存命中验证（仅 workflow_dispatch；必须容器层，目标 runner 需已由 postStart 注入重写） |
 | `gitcode_backend` | `smart-git-proxy` | 缓存后端：`smart-git-proxy`（gy-005，带 `/gitcode.com` 前缀段）/ `git-cdn-gitcode`（gy-006 `git-cdn-gitcode` 命名空间，根路径直挂） |
 | `gitcode_direct` | `0` | `1` = 跳过 insteadOf 断言，直接打后端基址，只验缓存服务本身（目标 runner 无法派发时用） |
+| `gitcode_lfs_repo` | 空 | LFS 验证目标仓库 URL（如 `https://gitcode.com/ascend/pytorch.git`）；空=用 `GITCODE_REPO`，其 `.gitattributes` 无 `filter=lfs` 则记 SKIP |
 
 也可在 GitHub 网页端触发：仓库 → **Actions** → **test-squid** → **Run workflow**。
 

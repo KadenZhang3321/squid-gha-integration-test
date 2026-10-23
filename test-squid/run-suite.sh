@@ -1699,12 +1699,14 @@ gitcode-lfs() {
     d1="$RESULTS_DIR/gitcode-lfs-1"; d2="$RESULTS_DIR/gitcode-lfs-2"
     rm -rf "$d1" "$d2"
     export GIT_LFS_SKIP_SMUDGE=1
-    if ! GIT_TERMINAL_PROMPT=0 git clone --single-branch -q "$url" "$d1" 2>"$RESULTS_DIR/gitcode-lfs-1.trace"; then
+    # LFS 仓库（如 ascend/pytorch）历史体积大，clone 用 --depth 1 只为取
+    # .gitattributes 与指针；LFS 对象由 git lfs pull 单独拉，与浅克隆无关。
+    if ! GIT_TERMINAL_PROMPT=0 git clone --depth 1 --single-branch -q "$url" "$d1" 2>"$RESULTS_DIR/gitcode-lfs-1.trace"; then
         echo "❌ LFS 用例 clone 失败"
         tail -n 8 "$RESULTS_DIR/gitcode-lfs-1.trace" | sed 's/^/    | /'
         return 1
     fi
-    if ! grep -rqE 'filter=lfs' "$d1/.gitattributes" 2>/dev/null; then
+    if ! grep -rqE --include='.gitattributes' 'filter=lfs' "$d1" 2>/dev/null; then
         echo "⚠️ $repo 的 .gitattributes 不含 filter=lfs → SKIP（用 GITCODE_LFS_REPO 指向真实 LFS 仓库再验）"
         rm -rf "$d1"
         return 2
@@ -1732,7 +1734,7 @@ gitcode-lfs() {
     e=$(date +%s%3N); t1=$((e-s))
     n1=$(cd "$d1" && git lfs ls-files 2>/dev/null | wc -l)
 
-    if ! GIT_TERMINAL_PROMPT=0 git clone --single-branch -q "$url" "$d2" 2>"$RESULTS_DIR/gitcode-lfs-2.trace"; then
+    if ! GIT_TERMINAL_PROMPT=0 git clone --depth 1 --single-branch -q "$url" "$d2" 2>"$RESULTS_DIR/gitcode-lfs-2.trace"; then
         echo "❌ 第 2 次 LFS clone 失败"
         return 1
     fi

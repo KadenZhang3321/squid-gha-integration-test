@@ -67,6 +67,10 @@ on:
         description: '1=跳过 insteadOf 断言，直连缓存后端（用于目标 runner 未注入重写时验证后端服务本身）'
         required: false
         default: '0'
+      gitcode_lfs_repo:
+        description: 'LFS 验证用的 gitcode 仓库 URL（空=用 GITCODE_REPO，无 filter=lfs 则 SKIP）'
+        required: false
+        default: ''
   pull_request:
     paths:
       - 'test-squid/**'
@@ -392,6 +396,7 @@ jobs:
           # 两种后端只差基址：smart-git-proxy 带 /gitcode.com 前缀段，
           # git-cdn-gitcode（#2237）直接以仓库路径挂在根上；脚本从展开结果反推。
           GITCODE_PROXY: ${{ inputs.gitcode_backend == 'git-cdn-gitcode' && 'http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000' || 'http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080' }}
+          GITCODE_LFS_REPO: ${{ inputs.gitcode_lfs_repo }}
         run: bash test-squid/run-suite.sh --mode gitcode --container
 
       - name: 上传结果
