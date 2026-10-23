@@ -1518,6 +1518,14 @@ GITCODE_REPO="${GITCODE_REPO:-https://gitcode.com/cann/catlass.git}"
 GITCODE_PROXY="${GITCODE_PROXY:-http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080}"
 GITCODE_STRICT="${GITCODE_STRICT:-0}"   # 1=重写缺失/无缓存收益时判红（定向验证用）
 GITCODE_DIRECT="${GITCODE_DIRECT:-0}"   # 1=跳过 insteadOf 断言，直接打 GITCODE_PROXY（验后端服务本身）
+# clone 形态，决定能否进后端 pack 缓存：
+#   full    = --single-branch（不带 depth）→ git-cdn/smart-git-proxy 的 can_be_cached() 才放行
+#   shallow = --depth 1 → git-cdn 默认 PACK_CACHE_DEPTH=false，带 depth 的请求直接不缓存，
+#             只能验"能拉下来"，不能验"二次命中"，故该形态下缓存断言记 SKIP 而非红。
+GITCODE_CLONE_MODE="${GITCODE_CLONE_MODE:-full}"
+# LFS 验证目标仓库。空=沿用 GITCODE_REPO，克隆后按 .gitattributes 是否含 filter=lfs 自动判定；
+# 目标仓库不含 LFS 时记 SKIP，可指向真实 LFS 仓库（如模型/权重仓库）再验。
+GITCODE_LFS_REPO="${GITCODE_LFS_REPO:-}"
 
 _gitcode_repo_path() { printf '%s' "${GITCODE_REPO#*gitcode.com}"; }   # /cann/catlass.git
 _gitcode_proxied_url() { git ls-remote --get-url "$GITCODE_REPO" 2>/dev/null; }
@@ -1592,17 +1600,22 @@ gitcode-refs-probe() {
 }
 
 gitcode-clone-hitmiss() {
-    local base url d1 d2 s e t1 t2 host hit=""
+    local base url d1 d2 s e t1 t2 host hit="" args
     base=$(_gitcode_base) || { echo "⚠️ 无法解析缓存后端基址，跳过 clone（见 gitcode-config）"; return 2; }
     url="${base}$(_gitcode_repo_path)"
     host="${base#*://}"; host="${host%%/*}"
-    echo "clone 目标: $url（对端 $host）"
+    case "$GITCODE_CLONE_MODE" in
+        full)    args=("--single-branch") ;;              # 不带 depth → 可进 pack 缓存
+        shallow) args=("--depth" "1" "--single-branch") ;; # 带 depth → 后端默认不缓存
+        *) echo "❌ 未知 GITCODE_CLONE_MODE=$GITCODE_CLONE_MODE（可选 full|shallow）"; return 1 ;;
+    esac
+    echo "clone 目标: $url（对端 $host，形态 $GITCODE_CLONE_MODE）"
     d1="$RESULTS_DIR/gitcode-clone-1"; d2="$RESULTS_DIR/gitcode-clone-2"
     rm -rf "$d1" "$d2"
 
     s=$(date +%s%3N)
     if ! GIT_TERMINAL_PROMPT=0 GIT_TRACE_CURL=1 \
-            git clone --depth 1 --single-branch -q "$url" "$d1" \
+            git clone "${args[@]}" -q "$url" "$d1" \
             2>"$RESULTS_DIR/gitcode-clone-1.trace"; then
         echo "❌ 第 1 次 clone 失败（重写后不可拉取）"
         tail -n 8 "$RESULTS_DIR/gitcode-clone-1.trace" | sed 's/^/    | /'
@@ -1612,7 +1625,7 @@ gitcode-clone-hitmiss() {
 
     s=$(date +%s%3N)
     if ! GIT_TERMINAL_PROMPT=0 GIT_TRACE_CURL=1 \
-            git clone --depth 1 --single-branch -q "$url" "$d2" \
+            git clone "${args[@]}" -q "$url" "$d2" \
             2>"$RESULTS_DIR/gitcode-clone-2.trace"; then
         echo "❌ 第 2 次 clone 失败"
         tail -n 8 "$RESULTS_DIR/gitcode-clone-2.trace" | sed 's/^/    | /'
@@ -1622,10 +1635,19 @@ gitcode-clone-hitmiss() {
 
     echo "耗时: 第1次 ${t1}ms / 第2次 ${t2}ms"
     if grep -q "$host" "$RESULTS_DIR/gitcode-clone-1.trace"; then
-        echo "✅ clone 实际经过 smart git proxy（trace 含 $host）"
+        echo "✅ clone 实际经过缓存后端（trace 含 $host）"
     else
-        echo "❌ clone 未经过 smart git proxy（trace 无 $host）——insteadOf 未生效"
+        echo "❌ clone 未经过缓存后端（trace 无 $host）——insteadOf 未生效"
         return 1
+    fi
+
+    # 带 depth 的请求在 git-cdn 后端不进 pack 缓存（can_be_cached() 要求 no-depth），
+    # 此时"二次无收益"是设计行为而非故障，记 SKIP，避免假红。
+    if [ "$GITCODE_CLONE_MODE" = "shallow" ]; then
+        rm -rf "$d1" "$d2"
+        echo "⚠️ shallow 形态（--depth 1）：后端默认 PACK_CACHE_DEPTH=false，pack 缓存不适用，缓存断言记 SKIP"
+        echo "ℹ️ 要验缓存收益请用 GITCODE_CLONE_MODE=full（默认）或后端开启 PACK_CACHE_DEPTH"
+        return 2
     fi
 
     grep -qiE '^< (cache-status:.*hit|x-cache: *hit|x-cache-status: *hit|age: *[1-9])' \
@@ -1633,20 +1655,104 @@ gitcode-clone-hitmiss() {
 
     rm -rf "$d1" "$d2"
     if [ -n "$hit" ]; then
-        echo "✅ 第 2 次响应头带缓存命中标记 → smart git proxy 已缓存该仓库"
+        echo "✅ 第 2 次响应头带缓存命中标记 → 后端已缓存该仓库"
         return 0
     fi
     if [ "$t1" -gt 0 ] && [ "$t2" -le $((t1 * 70 / 100)) ]; then
-        echo "✅ 第 2 次耗时下降 $((100 - t2 * 100 / t1))% → 命中 smart git proxy 缓存"
+        echo "✅ 第 2 次耗时下降 $((100 - t2 * 100 / t1))% → 命中后端 pack 缓存"
         return 0
     fi
     if [ "$t1" -le 5000 ] && [ "$t2" -le 5000 ]; then
         echo "✅ 两遍均 ≤5s（缓存已预热，无冷缓存对照）"
         return 0
     fi
-    echo "⚠️ 第 2 次未见缓存收益（t1=${t1}ms t2=${t2}ms）——smart git proxy 可能未缓存该仓库"
+    echo "⚠️ 第 2 次未见缓存收益（t1=${t1}ms t2=${t2}ms）——后端可能未缓存该仓库"
     if [ "$GITCODE_STRICT" = "1" ]; then echo "❌ GITCODE_STRICT=1，判失败"; return 1; fi
     return 2
+}
+
+# LFS 验证：git-cdn 会拦 info/lfs/objects/batch 并把 objects href 改写指向自己
+# （git_cdn.py:260/322 + lfs_cache_manager.py），故这里验三件事：
+#   ① git lfs 可用、目标仓库确含 LFS 对象（否则 SKIP，不判红）
+#   ② 两次独立 clone 各自 git lfs pull 均成功，对象全部落地
+#   ③ LFS endpoint 指向缓存后端主机（证明 batch 已被拦截改写，没绕去上游）
+gitcode-lfs() {
+    local base repo path url host d1 d2 ep t1 t2 s e n1 n2
+    base=$(_gitcode_base) || { echo "⚠️ 无法解析缓存后端基址，跳过 LFS（见 gitcode-config）"; return 2; }
+    repo="${GITCODE_LFS_REPO:-$GITCODE_REPO}"
+    path="${repo#*gitcode.com}"
+    url="${base}${path}"
+    host="${base#*://}"; host="${host%%/*}"
+    echo "LFS 目标: $url（对端 $host）"
+
+    if ! command -v git-lfs >/dev/null 2>&1; then
+        echo "⚠️ 容器内无 git-lfs，尝试安装"
+        if ! (apt-get install -y -q git-lfs >/dev/null 2>&1 || apt-get update -q >/dev/null 2>&1 && apt-get install -y -q git-lfs >/dev/null 2>&1); then
+            echo "⚠️ git-lfs 安装失败，LFS 用例记 SKIP"
+            return 2
+        fi
+    fi
+    git lfs version 2>/dev/null | sed 's/^/    | /' || true
+
+    d1="$RESULTS_DIR/gitcode-lfs-1"; d2="$RESULTS_DIR/gitcode-lfs-2"
+    rm -rf "$d1" "$d2"
+    export GIT_LFS_SKIP_SMUDGE=1
+    if ! GIT_TERMINAL_PROMPT=0 git clone --single-branch -q "$url" "$d1" 2>"$RESULTS_DIR/gitcode-lfs-1.trace"; then
+        echo "❌ LFS 用例 clone 失败"
+        tail -n 8 "$RESULTS_DIR/gitcode-lfs-1.trace" | sed 's/^/    | /'
+        return 1
+    fi
+    if ! grep -rqE 'filter=lfs' "$d1/.gitattributes" 2>/dev/null; then
+        echo "⚠️ $repo 的 .gitattributes 不含 filter=lfs → SKIP（用 GITCODE_LFS_REPO 指向真实 LFS 仓库再验）"
+        rm -rf "$d1"
+        return 2
+    fi
+    echo "✅ 目标仓库含 LFS 规则（.gitattributes filter=lfs）"
+
+    ep=$(cd "$d1" && git lfs env 2>/dev/null | sed -n 's/^Endpoint=\(.*\) (.*/\1/p' | head -1)
+    echo "LFS endpoint: ${ep:-<未解析>}"
+    if [ -n "$ep" ] && [ "${ep#*://}" != "${ep}" ]; then
+        case "${ep#*://}" in
+            "$host"*) echo "✅ LFS endpoint 指向缓存后端 $host（batch 已被拦截改写）" ;;
+            *) echo "❌ LFS endpoint 未指向缓存后端（${ep}）——batch 未改写，LFS 流量绕去上游"
+               [ "$GITCODE_STRICT" = "1" ] && return 1 ;;
+        esac
+    else
+        echo "⚠️ 无法解析 LFS endpoint，仅留档"
+    fi
+
+    s=$(date +%s%3N)
+    if ! (cd "$d1" && GIT_TERMINAL_PROMPT=0 git lfs pull >"$RESULTS_DIR/gitcode-lfs-pull-1.log" 2>&1); then
+        echo "❌ 第 1 次 git lfs pull 失败"
+        tail -n 8 "$RESULTS_DIR/gitcode-lfs-pull-1.log" | sed 's/^/    | /'
+        return 1
+    fi
+    e=$(date +%s%3N); t1=$((e-s))
+    n1=$(cd "$d1" && git lfs ls-files 2>/dev/null | wc -l)
+
+    if ! GIT_TERMINAL_PROMPT=0 git clone --single-branch -q "$url" "$d2" 2>"$RESULTS_DIR/gitcode-lfs-2.trace"; then
+        echo "❌ 第 2 次 LFS clone 失败"
+        return 1
+    fi
+    s=$(date +%s%3N)
+    if ! (cd "$d2" && GIT_TERMINAL_PROMPT=0 git lfs pull >"$RESULTS_DIR/gitcode-lfs-pull-2.log" 2>&1); then
+        echo "❌ 第 2 次 git lfs pull 失败"
+        tail -n 8 "$RESULTS_DIR/gitcode-lfs-pull-2.log" | sed 's/^/    | /'
+        return 1
+    fi
+    e=$(date +%s%3N); t2=$((e-s))
+    n2=$(cd "$d2" && git lfs ls-files 2>/dev/null | wc -l)
+
+    rm -rf "$d1" "$d2"
+    echo "LFS 对象数: $n1 / $n2；pull 耗时: 第1次 ${t1}ms / 第2次 ${t2}ms"
+    [ "$n1" -gt 0 ] && [ "$n1" = "$n2" ] || { echo "❌ 两次 pull 对象数不一致（$n1 vs $n2）"; return 1; }
+    echo "✅ 两次独立 clone 的 LFS 全量拉取均成功（对象 $n1 个），经 $host"
+    if [ "$t1" -gt 0 ] && [ "$t2" -le $((t1 * 70 / 100)) ]; then
+        echo "✅ 第 2 次 LFS pull 耗时下降 $((100 - t2 * 100 / t1))% → LFS 对象命中缓存"
+    else
+        echo "⚠️ 第 2 次 LFS pull 未见明显耗时下降（${t1}ms → ${t2}ms），仅留档"
+    fi
+    return 0
 }
 
 # =============================================================================
@@ -1737,6 +1843,7 @@ elif [ "$MODE" = "gitcode" ]; then
     run_timed gitcode-config        "$LAYER" gitcode-config
     run_timed gitcode-refs-probe    "$LAYER" gitcode-refs-probe
     run_timed gitcode-clone-hitmiss "$LAYER" gitcode-clone-hitmiss
+    run_timed gitcode-lfs           "$LAYER" gitcode-lfs
 else
     echo "未知 mode: $MODE（可选 function | concurrency | vllm | parity | upstream | imagebuild | cabundle | tools | pkg | gitcode）" >&2
     exit 2
