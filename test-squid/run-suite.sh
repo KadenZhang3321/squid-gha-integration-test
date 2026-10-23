@@ -1800,7 +1800,7 @@ gitcode-lfs() {
     rm -rf "$d1" "$d2"
     echo "LFS 对象 $obj 大小: ${sz1}B / ${sz2}B；pull 耗时: 第1次 ${t1}ms / 第2次 ${t2}ms"
     [ "$sz1" -gt 0 ] && [ "$sz1" = "$sz2" ] || { echo "❌ 两次下载的对象大小不一致（${sz1} vs ${sz2}）"; return 1; }
-    echo "✅ 两次独立 clone 的 LFS 对象下载均成功且大小一致（${sz1}B），经 $host"
+    echo "✅ 两次独立 clone 的 LFS 对象下载均成功且大小一致（${sz1}B）"
     if [ "${obj_via_cache:-0}" != 1 ]; then
         echo "⚠️ 对象未经缓存后端，耗时差（${t1}ms → ${t2}ms）只反映上游/网络，不作为缓存命中证据"
     elif [ "$t1" -gt 0 ] && [ "$t2" -le $((t1 * 70 / 100)) ]; then
