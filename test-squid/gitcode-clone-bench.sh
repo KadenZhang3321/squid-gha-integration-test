@@ -20,6 +20,9 @@
 #   GITHUB_REPO      github 对照仓库，默认本测试仓库
 #   GITHUB_ITERATIONS github 对照的克隆次数，默认 3
 #   REWRITE_STRICT   1=重写未生效即判失败（默认 1）
+#   REF              指定 commit/branch：clone 后 checkout 到该版本（默认空=默认分支）
+#   LFS_VERIFY       1=clone 后 git lfs pull，并逐文件校验 sha256 == pointer 里的 oid
+#   LFS_INCLUDE      LFS 只拉指定路径（git lfs pull -I），空=全部
 #   RESULTS_DIR      结果目录，默认 /tmp/gitcode-bench
 #
 # 输出：
@@ -27,7 +30,8 @@
 #   github.tsv       github 对照：iter / mode / exit / ms / bytes / MBps / url
 #   concurrency.tsv  并发明细：level / idx / exit / ms / bytes / MBps
 #   conc-levels.tsv  并发阶梯汇总：level / ok / fail / wall / median / min / max / MBps
-#   summary.md       汇总：冷/热耗时、加速比、中位数、吞吐、github 对照、并发表
+#   lfs.tsv          LFS 校验：iter / path / oid / actual / bytes / expect_size / match / pull_ms / age
+#   summary.md       汇总：冷/热耗时、加速比、中位数、吞吐、github 对照、并发表、LFS 校验
 #
 # 退出码：有克隆失败 → 1；重写断言失败 → 1；否则 0（性能数据不判红）
 # =============================================================================
@@ -43,13 +47,18 @@ GH_ON="${GITHUB_CLONE:-1}"
 GH_REPO="${GITHUB_REPO:-https://github.com/ascend-gha-runners/squid-gha-integration-test.git}"
 GH_ITER="${GITHUB_ITERATIONS:-3}"
 STRICT="${REWRITE_STRICT:-1}"
+REF="${REF:-}"
+LFS_VERIFY="${LFS_VERIFY:-0}"
+LFS_INCLUDE="${LFS_INCLUDE:-}"
 OUT="${RESULTS_DIR:-/tmp/gitcode-bench}"
 
 mkdir -p "$OUT"
 CSV="$OUT/clone.tsv"
 GH_CSV="$OUT/github.tsv"
+LFS_CSV="$OUT/lfs.tsv"
 SUMMARY="$OUT/summary.md"
 printf 'iter\tmode\texit\tms\tbytes\tMBps\turl\n' > "$CSV"
+printf 'iter\tpath\toid\tactual\tbytes\texpect_size\tmatch\tpull_ms\tage\n' > "$LFS_CSV"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 norm() { printf '%s' "${1%/}"; }
@@ -104,6 +113,60 @@ run_clone() {
     return "$rc"
 }
 
+# lfs_verify <dir> <tag>：git lfs pull 后逐文件校验 sha256 == pointer oid
+# 判据三条：① 文件已实体化（不是 pointer 原文）；② sha256 与 oid 一致；
+#           ③ 文件大小与 pointer 的 size 一致。任一不符即判失败。
+lfs_verify() {
+    local d="$1" tag="$2" sha="${3:-}"
+    local id="$tag:${sha:-?}"
+    local s e ms age bad=0 cnt=0
+    local -a inc=()
+    [ -n "$LFS_INCLUDE" ] && inc=(-I "$LFS_INCLUDE")
+    s=$(date +%s%3N)
+    if ! GIT_TERMINAL_PROMPT=0 GIT_CURL_VERBOSE=1 git -C "$d" lfs pull "${inc[@]}" \
+            >/dev/null 2>"$OUT/lfs-$tag.err"; then
+        log "❌ lfs pull 失败（iter $id）"
+        tail -n 5 "$OUT/lfs-$tag.err" 2>/dev/null | sed 's/^/    | /'
+        printf '%s\t-\t-\t-\t-\t-\tFAIL\t-\t-\n' "$id" >> "$LFS_CSV"
+        return 1
+    fi
+    e=$(date +%s%3N); ms=$((e - s))
+    # Age 响应头最大值：>0 说明该对象来自缓存（仅留证，不作判据）
+    age=$(grep -aioE '^< age: [0-9]+' "$OUT/lfs-$tag.err" 2>/dev/null \
+          | awk '{print $3}' | sort -n | tail -1); age=${age:--}
+
+    while read -r p; do
+        [ -n "$p" ] || continue
+        # LFS_INCLUDE 非空时只校验被拉取的那部分（其余文件保持 pointer 形态）
+        if [ -n "$LFS_INCLUDE" ]; then
+            case "$p" in $LFS_INCLUDE) ;; *) continue ;; esac
+        fi
+        cnt=$((cnt + 1))
+        local ptr oid size actual bytes match
+        ptr=$(git -C "$d" show "HEAD:$p" 2>/dev/null)
+        oid=$(printf '%s\n' "$ptr" | sed -n 's/^oid sha256://p' | head -1)
+        size=$(printf '%s\n' "$ptr" | sed -n 's/^size //p' | head -1)
+        if [ ! -f "$d/$p" ]; then
+            actual="-"; bytes=0; match="MISSING"
+        else
+            actual=$(sha256sum "$d/$p" | awk '{print $1}')
+            bytes=$(stat -c %s "$d/$p" 2>/dev/null || echo 0)
+            match=ok
+            [ "$actual" = "$oid" ] || match="SHA-MISMATCH"
+            [ "${size:-$bytes}" = "$bytes" ] || match="SIZE-MISMATCH"
+        fi
+        [ "$match" = ok ] || bad=$((bad + 1))
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$id" "$p" "${oid:0:12}" "${actual:0:12}" "$bytes" "${size:--}" "$match" "$ms" "$age" >> "$LFS_CSV"
+        log "lfs $p: oid=${oid:0:12} actual=${actual:0:12} ${bytes}B match=$match ${ms}ms age=$age"
+    done < <(git -C "$d" lfs ls-files -n 2>/dev/null)
+
+    if [ "$cnt" = 0 ]; then
+        log "⚠️ iter $tag 该 commit 没有 LFS 文件（ls-files 为空）"
+    fi
+    [ "$bad" -eq 0 ]
+}
+
 # --- ② 基线（可选）：跳过全局 insteadOf，直接打上游 --------------------------
 if [ "$BASELINE" = 1 ]; then
     uexp=$(GIT_CONFIG_GLOBAL=/dev/null git ls-remote --get-url "$REPO" 2>/dev/null)
@@ -123,8 +186,27 @@ fi
 # --- ③ 主循环：同一仓库重复 clone ------------------------------------------
 fails=0
 for i in $(seq 1 "$ITER"); do
-    run_clone "$i" "$MODE" "$url" "$OUT/clone-$i" || fails=$((fails + 1))
-    rm -rf "$OUT/clone-$i"
+    if ! run_clone "$i" "$MODE" "$url" "$OUT/clone-$i"; then
+        fails=$((fails + 1))
+        rm -rf "$OUT/clone-$i"
+        continue
+    fi
+    d="$OUT/clone-$i"
+    if [ -n "$REF" ]; then
+        if git -C "$d" checkout -q "$REF" 2>"$OUT/checkout-$i.err"; then
+            log "iter $i: checkout $REF（$(git -C "$d" rev-parse --short HEAD)）"
+        else
+            log "❌ iter $i: checkout $REF 失败（$MODE 形态可能取不到该 commit）"
+            tail -n 3 "$OUT/checkout-$i.err" 2>/dev/null | sed 's/^/    | /'
+            fails=$((fails + 1))
+            rm -rf "$d"
+            continue
+        fi
+    fi
+    if [ "$LFS_VERIFY" = 1 ]; then
+        lfs_verify "$d" "$i" "$(git -C "$d" rev-parse --short=12 HEAD)" || fails=$((fails + 1))
+    fi
+    rm -rf "$d"
 done
 
 # --- ③'' github 对照（可选）：走 pod 模板 postStart 注入的 gitconfig 重写
@@ -299,6 +381,23 @@ if [ -s "$CONC_TBL" ] && [ "$(wc -l < "$CONC_TBL")" -gt 1 ]; then
         printf '%s\n' "| 并发度 | 成功 | 失败 | 墙钟 | 单次中位数 | 最小 | 最大 | 聚合吞吐 |"
         printf '%s\n' "|---|---|---|---|---|---|---|---|"
         awk -F'\t' 'NR>1{printf "| %s | %s | %s | %s ms | %s ms | %s ms | %s ms | %s MB/s |\n", $1,$2,$3,$4,$5,$6,$7,$8}' "$CONC_TBL"
+    } >> "$SUMMARY"
+fi
+
+if [ -s "$LFS_CSV" ] && [ "$(awk 'END{print NR-1}' "$LFS_CSV")" -gt 0 ]; then
+    lfs_bad=$(awk -F'\t' 'NR>1 && $7 != "ok"' "$LFS_CSV" | wc -l)
+    {
+        printf '\n## LFS 下载校验\n\n'
+        printf -- '- 判据：下载文件的 sha256 必须等于 pointer 里的 oid，大小必须等于 pointer 的 size\n'
+        printf -- '- Age 为该次拉取响应里最大的 Age 值（>0 说明来自 squid 缓存，仅留证不判红）\n\n'
+        printf '| 版本 | 文件 | pointer oid | 实测 sha256 | 字节 | 期望 size | 判定 | pull 耗时 | Age |\n'
+        printf '|---|---|---|---|---|---|---|---|---|\n'
+        awk -F'\t' 'NR>1{printf "| %s | %s | %s | %s | %s | %s | %s | %s ms | %s |\n",$1,$2,$3,$4,$5,$6,$7,$8,$9}' "$LFS_CSV"
+        if [ "$lfs_bad" -gt 0 ]; then
+            printf '\n❌ 有 %s 个文件校验失败\n' "$lfs_bad"
+        else
+            printf '\n✅ 全部文件 sha256 与 pointer oid 一致\n'
+        fi
     } >> "$SUMMARY"
 fi
 

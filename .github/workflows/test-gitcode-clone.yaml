@@ -55,6 +55,18 @@ on:
         description: '克隆次数（第 1 次冷启动，其余为热路径）'
         required: false
         default: '5'
+      ref:
+        description: 'clone 后 checkout 到该 commit/branch（空=默认分支；校验历史版本下载用）'
+        required: false
+        default: ''
+      lfs_verify:
+        description: '1=clone 后 git lfs pull 并校验 sha256 == pointer oid'
+        required: false
+        default: '0'
+      lfs_include:
+        description: 'LFS 只拉指定路径（git lfs pull -I，空=全部）'
+        required: false
+        default: ''
       ladder:
         description: '并发阶梯（空格分隔，如 "1 4 8"）；空=只测串行（默认关）'
         required: false
@@ -103,6 +115,9 @@ jobs:
           GITCODE_PROXY: ${{ inputs.expect_backend != '' && inputs.expect_backend || (inputs.gitcode_backend == 'git-cdn-gitcode' && 'http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000' || (inputs.gitcode_backend == 'gitcache' && 'http://git-cache-http-server.git-cache.svc.cluster.local:8080' || 'http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080')) }}
           CLONE_MODE: ${{ inputs.clone_mode }}
           ITERATIONS: ${{ inputs.iterations }}
+          REF: ${{ inputs.ref }}
+          LFS_VERIFY: ${{ inputs.lfs_verify }}
+          LFS_INCLUDE: ${{ inputs.lfs_include }}
           LADDER: ${{ inputs.ladder }}
           GITHUB_CLONE: ${{ inputs.github_clone }}
           GITHUB_REPO: ${{ inputs.github_repo }}
