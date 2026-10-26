@@ -85,6 +85,8 @@ gh workflow run test-squid.yaml --repo ascend-gha-runners/squid-gha-integration-
 | `linux-amd64-cpu-4-gy004` | gy-004 | caNamespaces 已有，仅注入 |
 | `linux-amd64-cpu-8-gy005` | gy-005 | 保留 karpenter 注解；caNamespaces + ascend-gha-runners |
 | `linux-amd64-cpu-4-cn12-001` | cn12-001 | 已注入（2026-10-08，workflow pod 实测 env/CA 卷齐全） |
+| `linux-aarch64-a5-2-sh001` | sh-001 | 新增（2026-10-26）；aarch64 A5 |
+| `linux-amd64-a5-2-sh002` | sh-002 | 新增（2026-10-26）；amd64 A5 |
 
 ## 三、job 结构
 

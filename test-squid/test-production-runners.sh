@@ -43,6 +43,8 @@ RUNNERS=(
     "linux-amd64-cpu-4-gy004|gy-004|caNamespaces 已有，仅注入"
     "linux-amd64-cpu-8-gy005|gy-005|保留 karpenter 注解；caNamespaces + ascend-gha-runners"
     "linux-amd64-cpu-4-cn12-001|cn12-001|已注入（workflow pod 实测 env/CA 卷齐全）"
+    "linux-aarch64-a5-2-sh001|sh-001|新增（2026-10-26）；aarch64 A5"
+    "linux-amd64-a5-2-sh002|sh-002|新增（2026-10-26）；amd64 A5"
 )
 
 ONLY=""; EXCLUDE=""; NO_WATCH=0; LIST_ONLY=0; HEAVY=""; LADDER=""
@@ -128,7 +130,7 @@ watch_one() {  # watch_one <run_id>
 # ---------------------------------------------------------------------------
 # 主流程：两阶段并行。
 #   阶段 1 逐个触发（gh 调用本身很快）；阶段 2 并行盯所有 run——
-#   七个标签是七个不同集群，互不抢资源，并行总耗时 = 最慢的那个，
+#   各标签分属不同集群，互不抢资源，并行总耗时 = 最慢的那个，
 #   串行只会把各集群耗时相加（约 1-2 小时）。
 # ---------------------------------------------------------------------------
 declare -a LABELS=() IDS=() URLS=()
