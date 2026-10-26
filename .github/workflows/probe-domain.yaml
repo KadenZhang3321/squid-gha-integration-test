@@ -112,6 +112,26 @@ jobs:
           echo '===== 明细 ====='
           cat "$OUT"
 
+      - name: 418 取证（抓响应头/体）
+        run: |
+          set -u
+          for url in \
+            "https://raw.githubusercontent.com/mvdan/sh/master/README.md" \
+            "https://github.com/mvdan/sh/info/refs?service=git-upload-pack" ; do
+            for i in $(seq 1 15); do
+              hdr=$(curl -sS -D - -o /tmp/body418 -w 'CODE=%{http_code} TIME=%{time_total}\n' \
+                      --max-time 20 -r 0-2047 "$url" 2>&1) || true
+              code=$(printf '%s' "$hdr" | grep -o 'CODE=[0-9]*' | tail -1)
+              [ "$code" = "CODE=418" ] || { echo "[$url] try$i $code"; continue; }
+              echo "===== 418 命中：$url (try $i) ====="
+              printf '%s\n' "$hdr" | head -40
+              echo '----- body -----'
+              head -c 600 /tmp/body418; echo
+              break
+            done
+          done
+        if: always()
+
       - name: 上传结果
         if: always()
         uses: actions/upload-artifact@v7
