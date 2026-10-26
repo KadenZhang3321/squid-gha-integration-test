@@ -1,0 +1,27 @@
+name: repro-gitcode-rewrite
+
+# 临时最小复现：验证 runner 上 gitcode → 集群内 Service 的 insteadOf 重写是否可用。
+# 对应 vllm-ascend run 40288635068 的 checkout 失败（catlass 子模块 DNS 解析不了）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      labels:
+        description: 'runner 标签 JSON'
+        required: true
+
+jobs:
+  repro:
+    runs-on: ${{ fromJSON(inputs.labels) }}
+    timeout-minutes: 6
+    steps:
+      - name: 重写与 DNS
+        run: |
+          set -x
+          git config --get-regexp '^url\..*\.insteadof$' || true
+          git ls-remote --get-url https://gitcode.com/cann/catlass.git || true
+          port=$(git config --get-regexp '^url\..*\.insteadof$' | awk '{print $1}' | sed 's/^url\.//;s/\.insteadof$//' | head -1)
+          host=$(printf '%s' "$port" | sed -E 's#^[a-z]+://##; s#[:/].*$##')
+          echo "rewrite_host=$host"
+          getent hosts "$host" || echo "DNS-FAIL: $host"
+          timeout 25 git ls-remote https://gitcode.com/cann/catlass.git HEAD || echo "GIT-FAIL"
