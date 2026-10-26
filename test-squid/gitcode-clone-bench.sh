@@ -54,8 +54,8 @@ printf 'iter\tmode\texit\tms\tbytes\tMBps\turl\n' > "$CSV"
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 norm() { printf '%s' "${1%/}"; }
 
-path="${REPO#*gitcode.com}"                 # /cann/catlass.git
-origin=$(norm "${REPO%"$path"}")           # https://gitcode.com
+origin=$(printf '%s' "$REPO" | sed -E 's#^(https?://[^/]+).*#\1#')   # https://gitcode.com
+path=$(printf '%s' "$REPO" | sed -E 's#^https?://[^/]+##')           # /cann/catlass.git
 
 # --- ① 断言 insteadOf 生效，并从展开结果反推后端基址 -------------------------
 expanded=$(git ls-remote --get-url "$REPO" 2>/dev/null)
@@ -215,7 +215,7 @@ for lvl in $LADDER; do
 done
 
 # --- ④ 汇总：冷启动 vs 热路径（中位数），顺手出 markdown ----------------------
-awk -F'\t' -v repo="$REPO" -v backend="$base" -v mode="$MODE" -v iter="$ITER" '
+awk -F'\t' -v repo="$REPO" -v origin="$origin" -v backend="$base" -v mode="$MODE" -v iter="$ITER" '
 NR == 1 { next }
 $1 == "baseline" { bl = $4; next }
 {
@@ -231,12 +231,12 @@ END {
             if (warm[j] < warm[i]) { t = warm[i]; warm[i] = warm[j]; warm[j] = t }
     med = (w > 0) ? (w % 2 ? warm[(w+1)/2] : (warm[w/2] + warm[w/2+1]) / 2) : 0
 
-    print "## gitcode clone 性能"
+    print "## clone 性能"
     print ""
     printf "- 仓库: `%s`\n", repo
     printf "- 后端: `%s`\n", backend
     printf "- 形态: `%s`，次数: %s（第 1 次冷启动）\n", mode, iter
-    if (bl != "") printf "- 上游基线（直连 gitcode.com）: %d ms\n", bl
+    if (bl != "") printf "- 上游基线（直连 %s）: %d ms\n", origin, bl
     print ""
     print "| 指标 | 耗时 |"
     print "|---|---|"
