@@ -14,14 +14,19 @@
 #   BASELINE         1=额外克隆一次上游 gitcode.com 作对照（GIT_CONFIG_GLOBAL=/dev/null 跳过 insteadOf）
 #   LADDER           并发阶梯（空格分隔，如 "1 4 8"）；空=只测串行。
 #                    每个并发度下同时启动 N 个 clone（各自独立目录），记录墙钟与逐次耗时
+#   GITHUB_CLONE     1=额外测 github.com 的 clone（命令行对照，走镜像 gitconfig 的
+#                    gh-proxy 重写；git-cdn 后端只服务 gitcode.com，不参与）
+#   GITHUB_REPO      github 对照仓库，默认本测试仓库
+#   GITHUB_ITERATIONS github 对照的克隆次数，默认 3
 #   REWRITE_STRICT   1=重写未生效即判失败（默认 1）
 #   RESULTS_DIR      结果目录，默认 /tmp/gitcode-bench
 #
 # 输出：
 #   clone.tsv        每次克隆：iter / mode / exit / ms / bytes / MBps / url
+#   github.tsv       github 对照：iter / mode / exit / ms / bytes / MBps / url
 #   concurrency.tsv  并发明细：level / idx / exit / ms / bytes / MBps
 #   conc-levels.tsv  并发阶梯汇总：level / ok / fail / wall / median / min / max / MBps
-#   summary.md       汇总：冷/热耗时、加速比、中位数、吞吐、并发表
+#   summary.md       汇总：冷/热耗时、加速比、中位数、吞吐、github 对照、并发表
 #
 # 退出码：有克隆失败 → 1；重写断言失败 → 1；否则 0（性能数据不判红）
 # =============================================================================
@@ -33,11 +38,15 @@ MODE="${CLONE_MODE:-full}"
 ITER="${ITERATIONS:-5}"
 BASELINE="${BASELINE:-0}"
 LADDER="${LADDER:-}"
+GH_ON="${GITHUB_CLONE:-1}"
+GH_REPO="${GITHUB_REPO:-https://github.com/ascend-gha-runners/squid-gha-integration-test.git}"
+GH_ITER="${GITHUB_ITERATIONS:-3}"
 STRICT="${REWRITE_STRICT:-1}"
 OUT="${RESULTS_DIR:-/tmp/gitcode-bench}"
 
 mkdir -p "$OUT"
 CSV="$OUT/clone.tsv"
+GH_CSV="$OUT/github.tsv"
 SUMMARY="$OUT/summary.md"
 printf 'iter\tmode\texit\tms\tbytes\tMBps\turl\n' > "$CSV"
 
@@ -73,9 +82,9 @@ case "$MODE" in
     *) log "❌ 未知 CLONE_MODE=$MODE（可选 full|shallow）"; exit 1 ;;
 esac
 
-# run_clone <tag> <mode> <url> <dir>：计时并落一行 CSV
+# run_clone <tag> <mode> <url> <dir> [csv]：计时并落一行 CSV
 run_clone() {
-    local tag="$1" mode="$2" u="$3" d="$4"
+    local tag="$1" mode="$2" u="$3" d="$4" csv="${5:-$CSV}"
     local s e rc ms bytes mbps
     rm -rf "$d"
     s=$(date +%s%3N)
@@ -88,7 +97,7 @@ run_clone() {
     e=$(date +%s%3N); ms=$((e - s))
     bytes=$(du -sb "$d" 2>/dev/null | cut -f1); bytes=${bytes:-0}
     mbps=$(awk -v b="$bytes" -v ms="$ms" 'BEGIN{ if (ms > 0) printf "%.2f", (b/1048576)/(ms/1000); else print "0.00" }')
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$tag" "$mode" "$rc" "$ms" "$bytes" "$mbps" "$u" >> "$CSV"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$tag" "$mode" "$rc" "$ms" "$bytes" "$mbps" "$u" >> "$csv"
     log "iter $tag ($mode): exit=$rc ${ms}ms $((bytes/1048576))MB ${mbps}MB/s"
     [ -f "$OUT/clone-$tag.err" ] && [ -s "$OUT/clone-$tag.err" ] && tail -n 3 "$OUT/clone-$tag.err" | sed 's/^/    | /'
     return "$rc"
@@ -116,6 +125,19 @@ for i in $(seq 1 "$ITER"); do
     run_clone "$i" "$MODE" "$url" "$OUT/clone-$i" || fails=$((fails + 1))
     rm -rf "$OUT/clone-$i"
 done
+
+# --- ③'' github 对照（可选）：不做缓存断言，只记录经镜像 gitconfig 重写
+#     （github.com → gh-proxy）后的 clone 耗时；git-cdn 后端不参与 -----------
+gh_expanded=""
+if [ "$GH_ON" = 1 ]; then
+    printf 'iter\tmode\texit\tms\tbytes\tMBps\turl\n' > "$GH_CSV"
+    gh_expanded=$(git ls-remote --get-url "$GH_REPO" 2>/dev/null)
+    log "github URL 展开: $GH_REPO -> ${gh_expanded:-<空>}"
+    for i in $(seq 1 "$GH_ITER"); do
+        run_clone "gh-$i" github "$GH_REPO" "$OUT/gh-$i" "$GH_CSV" || fails=$((fails + 1))
+        rm -rf "$OUT/gh-$i"
+    done
+fi
 
 # --- ③' 并发阶梯（可选）：同时 clone N 份，测墙钟与逐次耗时 -------------------
 CONC_CSV="$OUT/concurrency.tsv"
@@ -233,6 +255,28 @@ END {
     else
         print "\n结论：未见明显缓存收益（冷缓存首跑 / 后端不缓存该形态时属正常，仅留档）。"
 }' "$CSV" > "$SUMMARY"
+
+if [ -s "$GH_CSV" ] && [ "$(awk 'END{print NR-1}' "$GH_CSV")" -gt 0 ]; then
+    gh_med=$(awk -F'\t' 'NR>1{a[n++]=$4} END{
+        for (i = 0; i < n; i++)
+            for (j = i + 1; j < n; j++)
+                if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
+        if (n == 0) print 0
+        else print (n % 2 ? a[int(n/2)] : (a[n/2-1] + a[n/2]) / 2)
+    }' "$GH_CSV")
+    {
+        printf '%s\n' ""
+        printf '## github clone（对照，不经 git-cdn）\n'
+        printf '%s\n' ""
+        printf -- '- 仓库: `%s`\n' "$GH_REPO"
+        printf -- '- URL 展开: `%s`\n' "${gh_expanded:-<空>}"
+        printf -- '- 中位数: %s ms\n' "$gh_med"
+        printf '%s\n' ""
+        printf '%s\n' "| 次数 | exit | 耗时 | 大小 | 吞吐 |"
+        printf '%s\n' "|---|---|---|---|---|"
+        awk -F'\t' 'NR>1{printf "| %s | %s | %s ms | %d MB | %s MB/s |\n", $1, $3, $4, $5/1048576, $6}' "$GH_CSV"
+    } >> "$SUMMARY"
+fi
 
 if [ -s "$CONC_TBL" ] && [ "$(wc -l < "$CONC_TBL")" -gt 1 ]; then
     {

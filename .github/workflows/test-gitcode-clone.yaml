@@ -8,6 +8,9 @@
 #   - 第 2..N 次 = 热路径，取中位数与冷启动对比
 #   - baseline=1 时额外克隆一次上游 gitcode.com（用 GIT_CONFIG_GLOBAL=/dev/null
 #     跳过 insteadOf）作为对照
+#   - ladder 非空时按并发阶梯同时 clone N 份（测墙钟/延迟放大/聚合吞吐）
+#   - github_clone=1 时额外克隆一个 github.com 仓库作对照：流量走镜像
+#     gitconfig 的 gh-proxy 重写，git-cdn 只服务 gitcode.com，不参与
 #
 # 前提（同 test-squid）：目标 runner 的 job pod 模板 postStart 已注入
 #   url.<backend>.insteadOf = https://gitcode.com/
@@ -51,6 +54,18 @@ on:
         description: '并发阶梯（空格分隔，如 "1 4 8"）；空=只测串行（默认关）'
         required: false
         default: ''
+      github_clone:
+        description: '1=额外测 github.com clone（对照，走镜像 gitconfig 的 gh-proxy；git-cdn 不参与）'
+        required: false
+        default: '1'
+      github_repo:
+        description: 'github 对照仓库（空=本测试仓库）'
+        required: false
+        default: ''
+      github_iterations:
+        description: 'github 对照克隆次数'
+        required: false
+        default: '3'
       baseline:
         description: '1=额外克隆一次上游 gitcode.com 作对照'
         required: false
@@ -80,6 +95,9 @@ jobs:
           CLONE_MODE: ${{ inputs.clone_mode }}
           ITERATIONS: ${{ inputs.iterations }}
           LADDER: ${{ inputs.ladder }}
+          GITHUB_CLONE: ${{ inputs.github_clone }}
+          GITHUB_REPO: ${{ inputs.github_repo }}
+          GITHUB_ITERATIONS: ${{ inputs.github_iterations }}
           BASELINE: ${{ inputs.baseline }}
           REWRITE_STRICT: '1'
           RESULTS_DIR: /tmp/gitcode-bench
