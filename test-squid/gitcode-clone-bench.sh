@@ -22,6 +22,8 @@
 #   REWRITE_STRICT   1=重写未生效即判失败（默认 1）
 #   REF              指定 commit/branch：clone 后 checkout 到该版本（默认空=默认分支）
 #   LFS_VERIFY       1=clone 后 git lfs pull，并逐文件校验 sha256 == pointer 里的 oid
+#   LFS_SKIP_SMUDGE  1=clone 只取 pointer（GIT_LFS_SKIP_SMUDGE=1），把 LFS 下载挪到
+#                    显式 git lfs pull，用于观察 MISS→HIT（默认 0=贴近真实 CI 行为）
 #   LFS_INCLUDE      LFS 只拉指定路径（git lfs pull -I），空=全部
 #   RESULTS_DIR      结果目录，默认 /tmp/gitcode-bench
 #
@@ -49,6 +51,7 @@ GH_ITER="${GITHUB_ITERATIONS:-3}"
 STRICT="${REWRITE_STRICT:-1}"
 REF="${REF:-}"
 LFS_VERIFY="${LFS_VERIFY:-0}"
+LFS_SKIP_SMUDGE="${LFS_SKIP_SMUDGE:-0}"
 LFS_INCLUDE="${LFS_INCLUDE:-}"
 OUT="${RESULTS_DIR:-/tmp/gitcode-bench}"
 
@@ -211,6 +214,11 @@ fi
 fails=0
 if [ "$LFS_VERIFY" = 1 ]; then
     ensure_lfs || { log "❌ git-lfs 不可用，LFS 校验无法进行"; exit 1; }
+    # 只取 pointer，把 LFS 下载留给显式 pull（便于观察 MISS→HIT）
+    if [ "$LFS_SKIP_SMUDGE" = 1 ]; then
+        export GIT_LFS_SKIP_SMUDGE=1
+        log "LFS_SKIP_SMUDGE=1：clone 只写 pointer，下载在 git lfs pull 阶段"
+    fi
 fi
 for i in $(seq 1 "$ITER"); do
     if ! run_clone "$i" "$MODE" "$url" "$OUT/clone-$i"; then

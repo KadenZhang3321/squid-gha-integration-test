@@ -67,6 +67,10 @@ on:
         description: 'LFS 只拉指定路径（git lfs pull -I，空=全部）'
         required: false
         default: ''
+      lfs_skip_smudge:
+        description: '1=clone 只取 pointer，LFS 下载挪到显式 pull（观察 MISS→HIT 用；默认 0 贴近真实 CI）'
+        required: false
+        default: '0'
       ladder:
         description: '并发阶梯（空格分隔，如 "1 4 8"）；空=只测串行（默认关）'
         required: false
@@ -117,6 +121,7 @@ jobs:
           ITERATIONS: ${{ inputs.iterations }}
           REF: ${{ inputs.ref }}
           LFS_VERIFY: ${{ inputs.lfs_verify }}
+          LFS_SKIP_SMUDGE: ${{ inputs.lfs_skip_smudge }}
           LFS_INCLUDE: ${{ inputs.lfs_include }}
           LADDER: ${{ inputs.ladder }}
           GITHUB_CLONE: ${{ inputs.github_clone }}
