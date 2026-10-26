@@ -1,0 +1,93 @@
+# =============================================================================
+# test-gitcode-clone —— 只测 gitcode clone 的性能（R22）
+#
+# 与 test-squid.yaml 里的 gitcode 组不同，本 workflow 不做 refs 探测、不做 LFS、
+# 只回答一个问题：同一个仓库重复 clone，走缓存后端到底多快？
+#
+#   - 第 1 次 clone = 冷启动（同时写入后端缓存）
+#   - 第 2..N 次 = 热路径，取中位数与冷启动对比
+#   - baseline=1 时额外克隆一次上游 gitcode.com（用 GIT_CONFIG_GLOBAL=/dev/null
+#     跳过 insteadOf）作为对照
+#
+# 前提（同 test-squid）：目标 runner 的 job pod 模板 postStart 已注入
+#   url.<backend>.insteadOf = https://gitcode.com/
+# 故必须跑容器层（runner 容器没有这条重写）。
+# =============================================================================
+name: test-gitcode-clone
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'runner 标签（JSON 数组字符串，多标签=AND；需已注入 gitcode 重写）'
+        required: false
+        default: '["linux-amd64-cpu-2", "gy-006"]'
+      gitcode_backend:
+        description: '缓存后端'
+        required: false
+        type: choice
+        options:
+          - git-cdn-gitcode
+          - smart-git-proxy
+          - gitcache
+        default: git-cdn-gitcode
+      repo:
+        description: 'clone 目标仓库'
+        required: false
+        default: 'https://gitcode.com/cann/catlass.git'
+      clone_mode:
+        description: 'full=--single-branch（可进 pack 缓存）/ shallow=--depth 1'
+        required: false
+        type: choice
+        options:
+          - full
+          - shallow
+        default: full
+      iterations:
+        description: '克隆次数（第 1 次冷启动，其余为热路径）'
+        required: false
+        default: '5'
+      baseline:
+        description: '1=额外克隆一次上游 gitcode.com 作对照'
+        required: false
+        default: '0'
+      container_image:
+        description: 'CANN 容器镜像（跨集群拉取慢时可换 quay 就近源）'
+        required: false
+        default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12'
+
+jobs:
+  clone-bench:
+    name: gitcode clone 性能（容器层）
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: 40
+    container:
+      image: ${{ inputs.container_image }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 运行 clone 性能测试
+        env:
+          GITCODE_REPO: ${{ inputs.repo }}
+          # 三种后端只差基址：smart-git-proxy 带 /gitcode.com 前缀段，
+          # git-cdn-gitcode 与 gitcache 直接以仓库路径挂在根上；
+          # 脚本从 insteadOf 展开结果反推基址，这里只作为期望值断言。
+          GITCODE_PROXY: ${{ inputs.gitcode_backend == 'git-cdn-gitcode' && 'http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000' || (inputs.gitcode_backend == 'gitcache' && 'http://git-cache-http-server.git-cache.svc.cluster.local:8080' || 'http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080') }}
+          CLONE_MODE: ${{ inputs.clone_mode }}
+          ITERATIONS: ${{ inputs.iterations }}
+          BASELINE: ${{ inputs.baseline }}
+          REWRITE_STRICT: '1'
+          RESULTS_DIR: /tmp/gitcode-bench
+        run: bash test-squid/gitcode-clone-bench.sh
+
+      - name: 写入 Summary
+        if: always()
+        run: cat /tmp/gitcode-bench/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: 上传结果
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gitcode-clone-bench
+          path: /tmp/gitcode-bench/
+          if-no-files-found: warn
