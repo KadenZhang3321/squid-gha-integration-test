@@ -47,6 +47,10 @@ on:
         description: '克隆次数（第 1 次冷启动，其余为热路径）'
         required: false
         default: '5'
+      ladder:
+        description: '并发阶梯（空格分隔，如 "1 4 8"）；空=只测串行（默认关）'
+        required: false
+        default: ''
       baseline:
         description: '1=额外克隆一次上游 gitcode.com 作对照'
         required: false
@@ -75,6 +79,7 @@ jobs:
           GITCODE_PROXY: ${{ inputs.gitcode_backend == 'git-cdn-gitcode' && 'http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000' || (inputs.gitcode_backend == 'gitcache' && 'http://git-cache-http-server.git-cache.svc.cluster.local:8080' || 'http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080') }}
           CLONE_MODE: ${{ inputs.clone_mode }}
           ITERATIONS: ${{ inputs.iterations }}
+          LADDER: ${{ inputs.ladder }}
           BASELINE: ${{ inputs.baseline }}
           REWRITE_STRICT: '1'
           RESULTS_DIR: /tmp/gitcode-bench

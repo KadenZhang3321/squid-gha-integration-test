@@ -12,12 +12,16 @@
 #                    shallow=--depth 1（多数后端默认不缓存，只测拉取速度）
 #   ITERATIONS       克隆次数，默认 5；第 1 次为冷启动，其余为热路径
 #   BASELINE         1=额外克隆一次上游 gitcode.com 作对照（GIT_CONFIG_GLOBAL=/dev/null 跳过 insteadOf）
+#   LADDER           并发阶梯（空格分隔，如 "1 4 8"）；空=只测串行。
+#                    每个并发度下同时启动 N 个 clone（各自独立目录），记录墙钟与逐次耗时
 #   REWRITE_STRICT   1=重写未生效即判失败（默认 1）
 #   RESULTS_DIR      结果目录，默认 /tmp/gitcode-bench
 #
 # 输出：
 #   clone.tsv        每次克隆：iter / mode / exit / ms / bytes / MBps / url
-#   summary.md       汇总：冷/热耗时、加速比、中位数、吞吐
+#   concurrency.tsv  并发明细：level / idx / exit / ms / bytes / MBps
+#   conc-levels.tsv  并发阶梯汇总：level / ok / fail / wall / median / min / max / MBps
+#   summary.md       汇总：冷/热耗时、加速比、中位数、吞吐、并发表
 #
 # 退出码：有克隆失败 → 1；重写断言失败 → 1；否则 0（性能数据不判红）
 # =============================================================================
@@ -28,6 +32,7 @@ BACKEND="${GITCODE_PROXY:-}"
 MODE="${CLONE_MODE:-full}"
 ITER="${ITERATIONS:-5}"
 BASELINE="${BASELINE:-0}"
+LADDER="${LADDER:-}"
 STRICT="${REWRITE_STRICT:-1}"
 OUT="${RESULTS_DIR:-/tmp/gitcode-bench}"
 
@@ -112,6 +117,80 @@ for i in $(seq 1 "$ITER"); do
     rm -rf "$OUT/clone-$i"
 done
 
+# --- ③' 并发阶梯（可选）：同时 clone N 份，测墙钟与逐次耗时 -------------------
+CONC_CSV="$OUT/concurrency.tsv"
+CONC_TBL="$OUT/conc-levels.tsv"
+if [ -n "$LADDER" ]; then
+    printf 'level\tidx\texit\tms\tbytes\tMBps\n' > "$CONC_CSV"
+    printf 'level\tok\tfail\twall_ms\tmedian_ms\tmin_ms\tmax_ms\tMBps\n' > "$CONC_TBL"
+fi
+
+# run_conc <level> <idx>：后台执行，结果写 c<idx>.res（idx/exit/ms/bytes）
+run_conc() {
+    local lvl="$1" idx="$2" d="$OUT/conc-$1/c$2"
+    local s e rc ms bytes
+    rm -rf "$d"
+    s=$(date +%s%3N)
+    if GIT_TERMINAL_PROMPT=0 git clone "${args[@]}" -q "$url" "$d" \
+            >/dev/null 2>"$OUT/conc-$lvl/c$idx.err"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    e=$(date +%s%3N); ms=$((e - s))
+    bytes=$(du -sb "$d" 2>/dev/null | cut -f1); bytes=${bytes:-0}
+    printf '%s\t%s\t%s\t%s\n' "$idx" "$rc" "$ms" "$bytes" > "$OUT/conc-$lvl/c$idx.res"
+    return "$rc"
+}
+
+for lvl in $LADDER; do
+    case "$lvl" in
+        ''|*[!0-9]*|0) log "⚠️ 跳过非法并发度 '$lvl'"; continue ;;
+    esac
+    lvl_dir="$OUT/conc-$lvl"
+    mkdir -p "$lvl_dir"
+    log "并发度 $lvl: 同时启动 $lvl 个 clone"
+    ws=$(date +%s%3N)
+    pids=""
+    for i in $(seq 1 "$lvl"); do
+        run_conc "$lvl" "$i" &
+        pids="$pids $!"
+    done
+    for p in $pids; do wait "$p" || true; done
+    we=$(date +%s%3N); wall=$((we - ws))
+
+    # 汇总本并发度：ok/fail、墙钟、逐次耗时中位数/极值、整体吞吐
+    agg=$(awk -F'\t' -v wall="$wall" '
+    { n++; rc[n] = $2; ms[n] = $3; by[n] = $4; if ($2 == 0) ok++; else fail++; tot += $4 }
+    END {
+        if (n == 0) { printf "0\t0\t%d\t0\t0\t0\t0.00\n", wall; exit }
+        for (i = 1; i <= n; i++)
+            for (j = i + 1; j <= n; j++)
+                if (ms[j] < ms[i]) { t = ms[i]; ms[i] = ms[j]; ms[j] = t }
+        med = (n % 2 ? ms[(n+1)/2] : (ms[n/2] + ms[n/2+1]) / 2)
+        mbps = (wall > 0) ? sprintf("%.2f", (tot/1048576)/(wall/1000)) : "0.00"
+        printf "%d\t%d\t%d\t%d\t%d\t%d\t%s\n", ok+0, fail+0, wall, med, ms[1], ms[n], mbps
+    }' "$lvl_dir"/*.res)
+    printf '%s\t%s\n' "$lvl" "$agg" >> "$CONC_TBL"
+
+    # 逐次明细落表（含单次吞吐）
+    awk -F'\t' -v lvl="$lvl" '
+    { mbps = ($3 > 0) ? sprintf("%.2f", ($4/1048576)/($3/1000)) : "0.00"
+      printf "%s\t%s\t%s\t%s\t%s\t%s\n", lvl, $1, $2, $3, $4, mbps }' \
+        "$lvl_dir"/*.res >> "$CONC_CSV"
+
+    lfail=$(printf '%s' "$agg" | cut -f2)
+    log "并发度 $lvl: ok=$(printf '%s' "$agg" | cut -f1) fail=$lfail wall=${wall}ms median=$(printf '%s' "$agg" | cut -f4)ms"
+    if [ "${lfail:-0}" -gt 0 ]; then
+        fails=$((fails + lfail))
+        log "❌ 并发度 $lvl 有 $lfail 次失败（明细见 $lvl_dir/c*.err）"
+        grep -l . "$lvl_dir"/c*.err 2>/dev/null | while read -r f; do
+            log "    | $f"; tail -n 3 "$f" | sed 's/^/    | /'
+        done
+    fi
+    rm -rf "$lvl_dir"/c*
+done
+
 # --- ④ 汇总：冷启动 vs 热路径（中位数），顺手出 markdown ----------------------
 awk -F'\t' -v repo="$REPO" -v backend="$base" -v mode="$MODE" -v iter="$ITER" '
 NR == 1 { next }
@@ -154,6 +233,19 @@ END {
     else
         print "\n结论：未见明显缓存收益（冷缓存首跑 / 后端不缓存该形态时属正常，仅留档）。"
 }' "$CSV" > "$SUMMARY"
+
+if [ -s "$CONC_TBL" ] && [ "$(wc -l < "$CONC_TBL")" -gt 1 ]; then
+    {
+        printf '%s\n' ""
+        printf '## gitcode clone 并发\n'
+        printf '%s\n' ""
+        printf '%s\n' "同一仓库同时 clone N 份（各自独立目录），墙钟为整组起止时间。"
+        printf '%s\n' ""
+        printf '%s\n' "| 并发度 | 成功 | 失败 | 墙钟 | 单次中位数 | 最小 | 最大 | 聚合吞吐 |"
+        printf '%s\n' "|---|---|---|---|---|---|---|---|"
+        awk -F'\t' 'NR>1{printf "| %s | %s | %s | %s ms | %s ms | %s ms | %s ms | %s MB/s |\n", $1,$2,$3,$4,$5,$6,$7,$8}' "$CONC_TBL"
+    } >> "$SUMMARY"
+fi
 
 cat "$SUMMARY"
 log "== 汇总（$CSV）=="
