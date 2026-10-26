@@ -30,7 +30,7 @@ gh workflow run test-squid.yaml --repo ascend-gha-runners/squid-gha-integration-
 | `heavy` | `0` | `1` = 启用 ~146MB 大载荷场景（耗时长，日常不用开） |
 | `np_strict` | `0` | `1` = 新增直连域（云元数据端点 + LLM 统计/API 域）必须全部命中 NO_PROXY，用于 gy-006 cpu-2 配置落地验证；默认宽松（未纳入本批的 runner set 记 SKIP） |
 | `gitcode` | `0` | `1` = 启用 gitcode.com → 缓存后端的 insteadOf 重写与缓存命中验证（仅 workflow_dispatch；必须容器层，目标 runner 需已由 postStart 注入重写） |
-| `gitcode_backend` | `smart-git-proxy` | 缓存后端：`smart-git-proxy`（gy-005，带 `/gitcode.com` 前缀段）/ `git-cdn-gitcode`（gy-006 及已完成改造的生产集群，`git-cdn-gitcode` 命名空间根路径直挂）/ `gitcache`（gy-001 既有 `git-cache-http-server`） |
+| `gitcode_backend` | `smart-git-proxy` | 缓存后端：`smart-git-proxy`（gy-005，带 `/gitcode.com` 前缀段）/ `git-cdn-gitcode`（gy-006 及已完成改造的生产集群，`git-cdn-gitcode` 命名空间根路径直挂） |
 | `gitcode_direct` | `0` | `1` = 跳过 insteadOf 断言，直接打后端基址，只验缓存服务本身（目标 runner 无法派发时用） |
 | `gitcode_lfs_repo` | 空 | LFS 验证目标仓库 URL（如 `https://gitcode.com/ascend/pytorch.git`）；空=用 `GITCODE_REPO`，其 `.gitattributes` 无 `filter=lfs` 则记 SKIP |
 | `container_image` | swr cn-north-12 CANN | CANN 容器层镜像。跨集群拉取慢（如 hk-001 拉 10GB 卡 30min+）时换就近仓库：`quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12` |
@@ -99,7 +99,7 @@ gh workflow run test-squid.yaml --repo ascend-gha-runners/squid-gha-integration-
 | `上游通道健康` | gh-proxy 延迟预算（p50≤5s，A/B 对照）+ read_timeout 数据留档（R17，runner 层 only；Actions 构件通道已入 NO_PROXY 直连，不测不过 squid 的流量） |
 | `镜像构建网络模拟` | vllm-ascend Dockerfile.310p 外网面复刻（R18）：catlass 子模块（gitcode.com pinned commit）+ cmake 第三方压缩包（cann-src-third-party ×5 两遍拉取 sha256 比对）+ GIT_PROXY insteadOf clone vllm（大 pack 吞吐）+ OBS 静态资产（CANN `.run` Range/HEAD 带 Referer、CI 覆盖率 JSON/tar.gz 魔数、gitleaks ELF 执行、负样本 404） |
 | `no_proxy × CA 注入矩阵` | CA 形态取证（纯 squid CA vs bundle）+ no_proxy 生效性 + 排他/union/追加三语义工具的直连/MITM 双路径矩阵 + 新增直连域（云元数据端点、LLM 统计/API 域，PR #2194）是否真的绕开 squid（R19，独立脚本 no-proxy-ca-test.sh；TLS-FAIL 红、NO_PROXY-MISS 红、OTHER-ERR/SKIP 不判红） |
-| `gitcode × 缓存后端` | R21 opt-in（`gitcode=1`）：insteadOf 重写生效性（`git ls-remote --get-url` 展开后反推基址）+ refs 端点可达性 + 同仓库两次 `--depth 1` clone 的缓存收益（缓存头 / 耗时比 / 双快判定）。后端由 `gitcode_backend` 选：`smart-git-proxy`（gy-005）/ `git-cdn-gitcode`（gy-006 #2237 及生产集群）/ `gitcache`（gy-001 既有 git-cache-http-server）；`gitcode_direct=1` 可绕过重写断言只验服务本身。流量属 `.svc.cluster.local` 直连，不经过 squid，故不跑 meta-trace。**只能跑容器层**——insteadOf 由 job pod 模板的 postStart 写入 `/root/.gitconfig`，runner 容器没有这条重写；作业挂在容器链末尾串行（issue #2）并用 `always()` 保底 |
+| `gitcode × 缓存后端` | R21 opt-in（`gitcode=1`）：insteadOf 重写生效性（`git ls-remote --get-url` 展开后反推基址）+ refs 端点可达性 + 同仓库两次 `--depth 1` clone 的缓存收益（缓存头 / 耗时比 / 双快判定）。后端由 `gitcode_backend` 选：`smart-git-proxy`（gy-005）/ `git-cdn-gitcode`（gy-006 #2237 及生产集群）；`gitcode_direct=1` 可绕过重写断言只验服务本身。流量属 `.svc.cluster.local` 直连，不经过 squid，故不跑 meta-trace。**只能跑容器层**——insteadOf 由 job pod 模板的 postStart 写入 `/root/.gitconfig`，runner 容器没有这条重写；作业挂在容器链末尾串行（issue #2）并用 `always()` 保底 |
 | `真实工具链 e2e` | 真实客户端工具（pip/apt/npm/uv/go/wget/git-lfs/modelscope/model+dataset/git）零镜像配置跑通；另复刻上游仓库 CI 现状：`download.pytorch.org` torch 索引、`hf download` + `HF_ENDPOINT=hf-mirror.com`；`heavy=1` 追加 torch wheel 全量下载 + rustup/conda/cmake/bazel/precommit |
 | `容器层·*（CANN 镜像）` | 功能/并发/vllm/工具链/miss-p95/镜像构建/no_proxy×CA 矩阵七组在 `cann:9.0.0-a3-ubuntu22.04-py3.12` 容器里各跑一遍（多验 CA 信任路径 + 镜像内 gitconfig 形态）；容器层 job 用 needs 链串行（container hook 并发挂死竞态，issue #2） |
 | `容器层·dnf/yum（openEuler 24.03）` | R20：`swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03` 里真实跑 `dnf makecache` + `dnf install tree` + `yum install jq`；首步 dnf 装 `git-core` 引导 checkout。这是套件里唯一覆盖 RHEL 系 CA 信任路径（anchors + `update-ca-trust`，不靠 CA env）的样本 |

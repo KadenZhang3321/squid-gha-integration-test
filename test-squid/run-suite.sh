@@ -1510,10 +1510,9 @@ ib-ascend-obs() {
 #   注意：本组流量【不应】经过 squid，故不跑 meta-trace。
 # =============================================================================
 GITCODE_REPO="${GITCODE_REPO:-https://gitcode.com/cann/catlass.git}"
-# 缓存后端基址。三种注入形态：
+# 缓存后端基址。两种注入形态：
 #   gy-005  smart-git-proxy：http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080/gitcode.com/
 #   gy-006  等生产集群 git-cdn-gitcode：http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000/
-#   gy-001  gitcache：http://git-cache-http-server.git-cache.svc.cluster.local:8080/
 # 重写后 URL 只差"是否带 /gitcode.com 前缀段"，故本组统一从展开结果反推基址，
 # 不硬编码前缀段（GITCODE_PROXY 只作为期望值断言）。
 GITCODE_PROXY="${GITCODE_PROXY:-http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080}"
@@ -1565,7 +1564,7 @@ gitcode-config() {
         return 0
     fi
     echo "⚠️ 未重写到 $(_gitcode_norm "$GITCODE_PROXY")（postStart 未生效 / 该 runner 未注入）"
-    echo "   已知后端基址: smart-git-proxy(gitcode.com/) | git-cdn-gitcode | gy-001 gitcache(git-cache-http-server)"
+    echo "   已知后端基址: smart-git-proxy(gitcode.com/) | git-cdn-gitcode"
     [ -n "$base" ] && echo "   本次实际: $base —— 若不是所选后端，用 -f gitcode_backend=<后端> 重跑"
     if [ "$GITCODE_STRICT" = "1" ]; then echo "❌ GITCODE_STRICT=1，判失败"; return 1; fi
     return 2

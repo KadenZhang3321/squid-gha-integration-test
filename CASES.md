@@ -303,16 +303,15 @@ OBS 分支（规则 11 把 OBS 划入不重写范围），实际命中规则 12�
 必须容器层：`insteadOf` 由 job pod 模板的 postStart 写入 `/root/.gitconfig`，
 runner 容器没有这条重写。
 
-三种后端（`-f gitcode_backend=`）：
+两种后端（`-f gitcode_backend=`）：
 
 | 后端 | 集群/runner | 重写目标 |
 |---|---|---|
 | `smart-git-proxy`（默认） | gy-005 `linux-amd64-cpu-8-gy005`（PR #2236） | `http://smart-git-proxy-service.smart-git-proxy.svc.cluster.local:8080/gitcode.com/` |
 | `git-cdn-gitcode` | gy-006 `linux-aarch64-cpu-2-gitcdn-test`（仓库 vllm-ascend，PR #2237）及已完成改造的生产集群 | `http://git-cdn-service.git-cdn-gitcode.svc.cluster.local:8000/` |
-| `gitcache` | gy-001 `linux-amd64-cpu-2-gy001`（既有 git-cache-http-server，未参与 #2249 改造） | `http://git-cache-http-server.git-cache.svc.cluster.local:8080/` |
 
 脚本不硬编码 `/gitcode.com` 前缀段：从 `git ls-remote --get-url` 展开结果剥掉仓库路径反推基址，
-因此三种形态共用一套断言。`-f gitcode_direct=1` 跳过重写断言、直接打后端基址，
+因此两种形态共用一套断言。`-f gitcode_direct=1` 跳过重写断言、直接打后端基址，
 用于目标 runner 无法派发（如 vllm-ascend 的 Actions 被禁用）时验证**缓存服务本身**。
 
 | 阶段 | 内容 | 判定 | 规则 |
