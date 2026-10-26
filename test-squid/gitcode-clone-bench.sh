@@ -14,8 +14,9 @@
 #   BASELINE         1=额外克隆一次上游 gitcode.com 作对照（GIT_CONFIG_GLOBAL=/dev/null 跳过 insteadOf）
 #   LADDER           并发阶梯（空格分隔，如 "1 4 8"）；空=只测串行。
 #                    每个并发度下同时启动 N 个 clone（各自独立目录），记录墙钟与逐次耗时
-#   GITHUB_CLONE     1=额外测 github.com 的 clone（命令行对照，走镜像 gitconfig 的
-#                    gh-proxy 重写；git-cdn 后端只服务 gitcode.com，不参与）
+#   GITHUB_CLONE     1=额外测 github.com 的 clone：走 pod 模板 postStart 注入的
+#                    gitconfig 重写（github.com → git-cdn 的 github 实例），
+#                    与 gitcode 是两套独立缓存后端
 #   GITHUB_REPO      github 对照仓库，默认本测试仓库
 #   GITHUB_ITERATIONS github 对照的克隆次数，默认 3
 #   REWRITE_STRICT   1=重写未生效即判失败（默认 1）
@@ -126,8 +127,8 @@ for i in $(seq 1 "$ITER"); do
     rm -rf "$OUT/clone-$i"
 done
 
-# --- ③'' github 对照（可选）：不做缓存断言，只记录经镜像 gitconfig 重写
-#     （github.com → gh-proxy）后的 clone 耗时；git-cdn 后端不参与 -----------
+# --- ③'' github 对照（可选）：走 pod 模板 postStart 注入的 gitconfig 重写
+#     （github.com → git-cdn 的 github 实例），只记录耗时，不做缓存命中断言 --
 gh_expanded=""
 if [ "$GH_ON" = 1 ]; then
     printf 'iter\tmode\texit\tms\tbytes\tMBps\turl\n' > "$GH_CSV"
@@ -257,20 +258,30 @@ END {
 }' "$CSV" > "$SUMMARY"
 
 if [ -s "$GH_CSV" ] && [ "$(awk 'END{print NR-1}' "$GH_CSV")" -gt 0 ]; then
-    gh_med=$(awk -F'\t' 'NR>1{a[n++]=$4} END{
-        for (i = 0; i < n; i++)
-            for (j = i + 1; j < n; j++)
-                if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
-        if (n == 0) print 0
-        else print (n % 2 ? a[int(n/2)] : (a[n/2-1] + a[n/2]) / 2)
+    gh_stat=$(awk -F'\t' '
+    NR > 1 { c++; ms[c] = $4; if ($3 != 0) f++ }
+    END {
+        if (c == 0) { print "0\t0\t0\t0"; exit }
+        cold = ms[1]; n = 0
+        for (i = 2; i <= c; i++) w[++n] = ms[i]
+        for (i = 1; i <= n; i++)
+            for (j = i + 1; j <= n; j++)
+                if (w[j] < w[i]) { t = w[i]; w[i] = w[j]; w[j] = t }
+        med = (n == 0) ? 0 : ((n % 2) ? w[int((n+1)/2)] : (w[n/2] + w[n/2+1]) / 2)
+        printf "%d\t%d\t%d\t%d\n", cold, med, c, f+0
     }' "$GH_CSV")
+    gh_cold=$(printf '%s' "$gh_stat" | cut -f1)
+    gh_med=$(printf '%s' "$gh_stat" | cut -f2)
+    gh_cnt=$(printf '%s' "$gh_stat" | cut -f3)
+    gh_fail=$(printf '%s' "$gh_stat" | cut -f4)
     {
         printf '%s\n' ""
-        printf '## github clone（对照，不经 git-cdn）\n'
+        printf '## github clone（github 缓存后端 git-cdn）\n'
         printf '%s\n' ""
         printf -- '- 仓库: `%s`\n' "$GH_REPO"
         printf -- '- URL 展开: `%s`\n' "${gh_expanded:-<空>}"
-        printf -- '- 中位数: %s ms\n' "$gh_med"
+        printf -- '- 冷启动: %s ms；热路径中位数: %s ms（共 %s 次%s）\n' \
+            "$gh_cold" "$gh_med" "$gh_cnt" "$([ "$gh_fail" -gt 0 ] && printf '，失败 %s 次' "$gh_fail")"
         printf '%s\n' ""
         printf '%s\n' "| 次数 | exit | 耗时 | 大小 | 吞吐 |"
         printf '%s\n' "|---|---|---|---|---|"
