@@ -113,6 +113,30 @@ run_clone() {
     return "$rc"
 }
 
+# ensure_lfs：容器镜像通常不带 git-lfs，先 apt 安装，失败再走官方 release 自举
+ensure_lfs() {
+    command -v git-lfs >/dev/null 2>&1 && { log "git-lfs 可用（$(git lfs version)）"; return 0; }
+    log "容器内无 git-lfs，尝试 apt-get 安装"
+    if apt-get install -y -q git-lfs >/dev/null 2>&1 \
+            || { apt-get update -q >/dev/null 2>&1 && apt-get install -y -q git-lfs >/dev/null 2>&1; }; then
+        command -v git-lfs >/dev/null 2>&1 \
+            && { log "git-lfs 安装完成（$(git lfs version)）"; return 0; }
+    fi
+    local arch d
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+    esac
+    log "⚠️ apt 安装失败，改用官方 release bootstrap（linux-$arch）"
+    d=$(mktemp -d)
+    curl -fsSL "https://github.com/git-lfs/git-lfs/releases/download/v3.7.0/git-lfs-linux-${arch}-v3.7.0.tar.gz" \
+        | tar xz -C "$d" || { log "❌ git-lfs 下载失败"; return 1; }
+    export PATH="$d/git-lfs-3.7.0:$PATH"
+    git lfs version || { log "❌ git-lfs 二进制不可用"; return 1; }
+    log "git-lfs bootstrap 完成"
+}
+
 # lfs_verify <dir> <tag>：git lfs pull 后逐文件校验 sha256 == pointer oid
 # 判据三条：① 文件已实体化（不是 pointer 原文）；② sha256 与 oid 一致；
 #           ③ 文件大小与 pointer 的 size 一致。任一不符即判失败。
@@ -185,6 +209,9 @@ fi
 
 # --- ③ 主循环：同一仓库重复 clone ------------------------------------------
 fails=0
+if [ "$LFS_VERIFY" = 1 ]; then
+    ensure_lfs || { log "❌ git-lfs 不可用，LFS 校验无法进行"; exit 1; }
+fi
 for i in $(seq 1 "$ITER"); do
     if ! run_clone "$i" "$MODE" "$url" "$OUT/clone-$i"; then
         fails=$((fails + 1))
