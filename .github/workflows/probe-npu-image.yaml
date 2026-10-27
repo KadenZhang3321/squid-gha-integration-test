@@ -2,13 +2,15 @@ name: probe-npu-image
 
 # 临时探针：只取事实，不做断言。
 # 目的：在带 NPU 注入的 runner 上，对比不同基底镜像里 npu-smi 的可见性与可执行性。
+# runs-on 必须是 NPU runner set（CPU 机无 /dev/davinci_manager，gate 不进、取不到证）。
+# 附：postStart 检查在 dash 下 `&>` 恒真的行为差异，见 ascend-ci-deployment#2302。
 on:
   workflow_dispatch:
 
 jobs:
   probe:
     name: probe ${{ matrix.image }}
-    runs-on: ["linux-amd64-cpu-2", "gy-006"]
+    runs-on: ["linux-aarch64-a5-2", "sh-001"]
     strategy:
       fail-fast: false
       matrix:

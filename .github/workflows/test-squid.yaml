@@ -76,9 +76,9 @@ on:
         required: false
         default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-ubuntu22.04-py3.12'
       openeuler_image:
-        description: 'dnf/yum 容器层镜像（需 openEuler 24.03 基底；默认带 CANN 工具链，保证 NPU runner 的 pod postStart npu-smi 检查能秒过）'
+        description: 'dnf/yum 容器层镜像（跨集群拉取慢时换成就近仓库，如 quay.io/openeuler/openeuler:24.03）'
         required: false
-        default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12'
+        default: 'swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03'
   pull_request:
     paths:
       - 'test-squid/**'
@@ -517,14 +517,17 @@ jobs:
     # 套件内 pkg 阶段在两处 SKIP）。该镜像不带 git：先 dnf 装 git-core 引导
     # checkout——这一步本身就是真实 dnf 安装链路（含 GPG key 校验：gpgkey 走
     # http://repo.openeuler.org，正是规则10 的 yum host 交换域）。
-    # 默认用 openEuler 基线的 CANN 镜像（而非纯 openeuler:24.03）：NPU runner
-    # 的 job pod postStart 会等 npu-smi，纯 OS 镜像无该命令 → 300s 超时 exit 1
-    # → kubelet SIGKILL(137)（sh-001/sh-002 实证），CANN 版秒过。
+    # NPU runner（a5-2-sh001/sh002）的 job pod postStart 内联 NPU 检查含
+    # bashism（`&>`、$SECONDS）：ubuntu 基底 /bin/sh=dash 下条件恒真、检查
+    # 形同虚设；openEuler 基底=bash 下真实执行，镜像无 npu-smi → 300s 超时
+    # exit 1 → kubelet SIGKILL(137)（run 40436398713/40433513774 实证）。
+    # 根治见 ascend-ci-deployment#2302（POSIX 化 + command -v 守卫 + 非致命），
+    # 合入前本 job 勿 dispatch 到 a5-2 NPU runner set（用 CPU set 不受影响）。
     # CA 信任走 RHEL 路径：注入脚本 anchors + update-ca-trust extract。
     # 容器层 job 仍须串行（issue #2 挂死竞态），挂在本链末尾。
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
     container:
-      image: ${{ inputs.openeuler_image || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-a3-openeuler24.03-py3.12' }}
+      image: ${{ inputs.openeuler_image || 'swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/openeuler/openeuler:24.03' }}
     steps:
       - name: 引导 git（dnf 真实安装；镜像默认 repo 含 debuginfo/source，仅开 OS）
         run: dnf -y --disablerepo='*' --enablerepo=OS install git-core
