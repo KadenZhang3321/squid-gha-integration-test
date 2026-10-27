@@ -34,7 +34,7 @@ gh workflow run test-squid.yaml --repo ascend-gha-runners/squid-gha-integration-
 | `gitcode_direct` | `0` | `1` = 跳过 insteadOf 断言，直接打后端基址，只验缓存服务本身（目标 runner 无法派发时用） |
 | `gitcode_lfs_repo` | 空 | LFS 验证目标仓库 URL（如 `https://gitcode.com/ascend/pytorch.git`）；空=用 `GITCODE_REPO`，其 `.gitattributes` 无 `filter=lfs` 则记 SKIP |
 | `container_image` | swr cn-north-12 CANN | CANN 容器层镜像。跨集群拉取慢（如 hk-001 拉 10GB 卡 30min+）时换就近仓库：`quay.io/ascend/cann:9.0.0-a3-ubuntu22.04-py3.12` |
-| `openeuler_image` | swr cn-southwest-2 openEuler | dnf/yum 容器层镜像。同上，可换 `quay.io/openeuler/openeuler:24.03` |
+| `openeuler_image` | swr cn-north-12 CANN openEuler | dnf/yum 容器层镜像（openEuler 24.03 基底，默认带 CANN 工具链，NPU runner 的 postStart `npu-smi` 检查才能秒过；纯 `openeuler:24.03` 在 sh-001/sh-002 会 300s 超时被杀） |
 
 也可在 GitHub 网页端触发：仓库 → **Actions** → **test-squid** → **Run workflow**。
 
