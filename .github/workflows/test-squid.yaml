@@ -521,8 +521,10 @@ jobs:
     # bashism（`&>`、$SECONDS）：ubuntu 基底 /bin/sh=dash 下条件恒真、检查
     # 形同虚设；openEuler 基底=bash 下真实执行，镜像无 npu-smi → 300s 超时
     # exit 1 → kubelet SIGKILL(137)（run 40436398713/40433513774 实证）。
-    # 根治见 ascend-ci-deployment#2302（POSIX 化 + command -v 守卫 + 非致命），
-    # 合入前本 job 勿 dispatch 到 a5-2 NPU runner set（用 CPU set 不受影响）。
+    # 根治见 ascend-ci-deployment#2302：postStart NPU 检查三态判定
+    # （可执行且正常→过；环境跑不起来[无命令或 liburma 缺库]→瞬时跳过；
+    # 设备真坏→300s 后带日志有限 fatal）。其合入前本 job 勿 dispatch
+    # 到 a5-2 NPU runner set（用 CPU set 不受影响）。
     # CA 信任走 RHEL 路径：注入脚本 anchors + update-ca-trust extract。
     # 容器层 job 仍须串行（issue #2 挂死竞态），挂在本链末尾。
     runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["linux-amd64-cpu-2", "gy-006"]' || inputs.runner) }}
